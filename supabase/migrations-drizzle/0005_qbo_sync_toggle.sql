@@ -1,0 +1,1 @@
+ALTER TABLE "bk_ledger_entities" ADD COLUMN "qbo_sync_enabled" boolean DEFAULT true NOT NULL;

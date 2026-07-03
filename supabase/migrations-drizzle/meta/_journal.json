@@ -1,0 +1,55 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1780681968411,
+      "tag": "0000_phase6_ledger",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1780685597688,
+      "tag": "0001_bk_loans",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1780701926932,
+      "tag": "0002_nostalgic_lockjaw",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1780763736531,
+      "tag": "0003_plaid_decouple_entity",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1780774475300,
+      "tag": "0004_tense_rage",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1780774874190,
+      "tag": "0005_qbo_sync_toggle",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1780856923998,
+      "tag": "0006_category_suggestions",
+      "breakpoints": true
+    }
+  ]
+}

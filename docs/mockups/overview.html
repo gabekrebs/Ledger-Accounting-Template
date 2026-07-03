@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Ledger — Overview mockup (returns-led)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+  :root{
+    --paper:#FAF8F4; --ink:#1C1B19; --muted:#6B6A65; --faint:#9A988F; --hair:#E7E3DB;
+    --accent:#1F4D3A; --accent-soft:#1F4D3A14; --accent-line:#1F4D3A33;
+    --neg:#8A3324;
+    --serif:'Source Serif 4'; --sans:'Geist', system-ui, sans-serif; --mono:'Geist Mono', ui-monospace, monospace;
+  }
+  *{ box-sizing:border-box; }
+  html{ -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility; }
+  body{ margin:0; background:var(--paper); color:var(--ink); font-family:var(--sans); font-size:15px; line-height:1.5; font-feature-settings:"tnum"; }
+  .wrap{ max-width:880px; margin:0 auto; padding:56px 32px 96px; }
+
+  .serif{ font-family:var(--serif); font-weight:500; letter-spacing:-0.01em; }
+  .mono{ font-family:var(--mono); font-variant-numeric:tabular-nums; }
+  .label{ font-size:11px; letter-spacing:0.11em; text-transform:uppercase; color:var(--muted); font-weight:500; }
+  .cents{ font-size:0.78em; color:var(--faint); }
+  .neg{ color:var(--neg); } .pos{ color:var(--accent); }
+
+  .crumb{ color:var(--faint); font-size:13px; text-decoration:none; }
+  .title{ font-size:30px; margin:6px 0 0; }
+  .metarow{ margin-top:6px; display:flex; gap:10px; align-items:center; }
+  .pill{ font-size:11px; letter-spacing:0.06em; text-transform:uppercase; color:var(--accent); background:var(--accent-soft); padding:2px 8px; border-radius:999px; font-weight:500; }
+  .rule{ height:1px; background:var(--hair); border:0; margin:40px 0; }
+
+  /* hero */
+  .hero{ display:grid; grid-template-columns:1.1fr 1fr; gap:56px; margin-top:36px; align-items:start; }
+  .hero .big{ font-size:58px; line-height:1; margin:10px 0 0; }
+  .hero .sub{ color:var(--muted); font-size:14px; margin-top:14px; }
+  .hero .sub b{ color:var(--ink); font-weight:500; }
+  .chips{ display:flex; gap:22px; margin-top:18px; }
+  .chip .label{ margin-bottom:3px; }
+  .chip .v{ font-size:22px; }
+
+  /* assumptions panel */
+  .assume{ background:#fff; border:1px solid var(--hair); border-radius:14px; padding:18px 18px 16px; }
+  .assume .top{ display:flex; justify-content:space-between; align-items:baseline; }
+  .assume .top .k{ color:var(--muted); font-size:13px; }
+  .assume .top .val{ font-family:var(--mono); font-weight:500; }
+  input[type=range]{ -webkit-appearance:none; appearance:none; width:100%; height:3px; border-radius:3px; margin:12px 0 4px; cursor:pointer; }
+  input[type=range]::-webkit-slider-thumb{ -webkit-appearance:none; width:15px; height:15px; border-radius:50%; background:var(--accent); border:2px solid #fff; box-shadow:0 1px 3px #00000026; }
+  .imp{ font-size:12px; color:var(--faint); margin-top:6px; }
+  .chk{ display:flex; gap:7px; align-items:center; font-size:12px; color:var(--muted); margin-top:14px; }
+  .chk input{ accent-color:var(--accent); }
+
+  /* four-way breakdown */
+  .ways{ margin-top:30px; }
+  .ways h2{ font-size:18px; margin:0 0 4px; }
+  .ways .cap{ color:var(--muted); font-size:13px; margin:0 0 16px; }
+  .way{ display:grid; grid-template-columns:170px 1fr 120px; align-items:center; gap:16px; padding:9px 0; border-bottom:1px solid var(--hair); }
+  .way .nm{ font-size:14px; } .way .nm small{ color:var(--faint); font-size:12px; margin-left:6px; }
+  .track{ height:8px; background:#EEEAE1; border-radius:6px; position:relative; }
+  .fill{ position:absolute; top:0; bottom:0; border-radius:6px; }
+  .fill.p{ background:var(--accent); } .fill.n{ background:var(--neg); }
+  .way .amt{ text-align:right; font-family:var(--mono); font-variant-numeric:tabular-nums; }
+  .way.total{ border-bottom:0; border-top:1px solid var(--ink); margin-top:6px; padding-top:13px; }
+  .way.total .nm{ font-weight:600; } .way.total .amt{ font-size:18px; font-weight:600; }
+
+  .note{ color:var(--faint); font-size:12px; margin-top:14px; max-width:640px; line-height:1.6; }
+
+  /* NOI trajectory mini */
+  .traj{ display:grid; grid-template-columns:1fr 1fr; gap:56px; align-items:center; }
+  .traj .read{ color:var(--muted); font-size:14px; max-width:330px; }
+  .traj .read b{ color:var(--ink); font-weight:500; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <a class="crumb" href="#">← All entities</a>
+    <h1 class="title serif">123 Main Street LLC</h1>
+    <div class="metarow"><span class="pill">Partnership</span><span style="color:var(--muted);font-size:13px">Synced through Jun 2, 2026</span></div>
+
+    <!-- HERO: returns-led -->
+    <div class="hero">
+      <div>
+        <div class="label">Total return · since inception · 3.6 yrs</div>
+        <div class="big serif pos">+$<span id="tot">185,771</span></div>
+        <div class="sub"><b id="roe">37.9%</b> on $489,981 contributed · <b id="ann">10.5%</b> / yr</div>
+        <div class="chips">
+          <div class="chip">
+            <div class="label">Implied value</div>
+            <div class="v serif" id="val">$911,447</div>
+          </div>
+          <div class="chip">
+            <div class="label">Market equity</div>
+            <div class="v serif" id="meq">$273,675</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="assume">
+        <div class="top"><span class="k">Cap rate</span><span class="val" id="crv">6.00%</span></div>
+        <input type="range" id="cap" min="3" max="9" step="0.05" value="6" />
+        <div class="imp">Implied value <span id="impv">$911,447</span> · 2025 NOI $54,687</div>
+
+        <div class="top" style="margin-top:16px"><span class="k">Marginal tax rate</span><span class="val" id="trv">37%</span></div>
+        <input type="range" id="tax" min="0" max="50" step="1" value="37" />
+        <label class="chk"><input type="checkbox" id="lu" checked /> Losses usable now (else deferred to sale → $0)</label>
+      </div>
+    </div>
+
+    <!-- FOUR WAYS -->
+    <div class="ways">
+      <h2 class="serif">The four ways it pays you</h2>
+      <p class="cap">Every dollar of return since inception, by source. Drag the assumptions above to see them move.</p>
+      <div class="way"><div class="nm">Cash flow <small>NOI − interest</small></div><div class="track"><div class="fill n" id="b_cf"></div></div><div class="amt neg" id="v_cf">($41,579)</div></div>
+      <div class="way"><div class="nm">Principal paydown <small>mortgage paid down</small></div><div class="track"><div class="fill p" id="b_pp"></div></div><div class="amt" id="v_pp">$35,254</div></div>
+      <div class="way"><div class="nm">Appreciation <small>value − purchase</small></div><div class="track"><div class="fill p" id="b_ap"></div></div><div class="amt" id="v_ap">$104,897</div></div>
+      <div class="way"><div class="nm">Tax benefit <small id="tbh">loss × 37%</small></div><div class="track"><div class="fill p" id="b_tb"></div></div><div class="amt" id="v_tb">$87,199</div></div>
+      <div class="way total"><div class="nm">Total return</div><div></div><div class="amt pos" id="v_tot">$185,771</div></div>
+    </div>
+    <p class="note">Three different “equity” numbers, all true: <b>contributed capital $489,981</b> (what partners put in) · <b>book equity $254,309</b> (after depreciation, used for K-1s) · <b>market equity ~$273,675</b> (implied value − debt). The return above is measured against contributed capital. Tax benefit assumes losses offset other income now; passive-loss rules may defer them to sale.</p>
+
+    <hr class="rule" />
+
+    <!-- NOI trajectory -->
+    <div class="traj">
+      <div>
+        <div class="label">Net operating income</div>
+        <div class="serif pos" style="font-size:30px;margin-top:8px">+$54,687 <span style="font-size:14px;color:var(--muted);font-family:var(--sans);font-weight:400">in 2025</span></div>
+        <svg width="300" height="60" viewBox="0 0 300 60" style="margin-top:10px">
+          <line x1="0" y1="44" x2="300" y2="44" stroke="#E1DCD2"/>
+          <path d="M0 56 L75 42 L150 16 L225 15 L225 44 L150 44 L75 44 L0 44 Z" fill="var(--accent-soft)"/>
+          <polyline points="0,56 75,42 150,16 225,15" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round"/>
+          <polyline points="225,15 300,38" fill="none" stroke="var(--accent)" stroke-width="2" stroke-dasharray="2 3" opacity=".5"/>
+          <circle cx="225" cy="15" r="3" fill="var(--accent)"/><circle cx="0" cy="56" r="2.5" fill="var(--neg)"/>
+        </svg>
+      </div>
+      <div class="read"><b>Turning profitable.</b> NOI climbed from a <span class="neg">($28,766)</span> loss in 2022 to <b class="pos">+$54,687</b> in 2025 — the property now covers operating costs and builds equity. <span style="color:var(--faint)">(Full performance-by-year table + collapsible tax bridge sits here, in the figure system you already approved.)</span></div>
+    </div>
+  </div>
+
+<script>
+  const NOI2025=5468682, PURCHASE=80655000, CONTRIB=48998100, ORIG=60491300, MORTGAGE=56965909, DEBT=63777189, CUMLOSS=23567191, CFLOW=-4157891, PAYDOWN=ORIG-MORTGAGE, YEARS=3.6;
+  const $=id=>document.getElementById(id);
+  const fmt=c=>{const n=Math.round(c/100);const s=n.toLocaleString('en-US');return n<0?'('+s.replace('-','')+')':'$'+s;};
+  const fmtP=c=>{const n=Math.round(c/100);return (n<0?'(':'+$')+Math.abs(n).toLocaleString('en-US')+(n<0?')':'');};
+  function calc(){
+    const cap=parseFloat($('cap').value), tax=parseInt($('tax').value), lu=$('lu').checked;
+    const val=Math.round(NOI2025/(cap/100));
+    const appr=val-PURCHASE;
+    const tb=lu?Math.round(CUMLOSS*tax/100):0;
+    const tot=CFLOW+PAYDOWN+appr+tb;
+    const roe=CONTRIB?tot/CONTRIB*100:0;
+    const meq=val-DEBT;
+    $('crv').textContent=cap.toFixed(2)+'%'; $('trv').textContent=tax+'%';
+    $('cap').style.background=grad($('cap')); $('tax').style.background=grad($('tax'));
+    $('impv').textContent='$'+Math.round(val/100).toLocaleString('en-US');
+    $('val').textContent='$'+Math.round(val/100).toLocaleString('en-US');
+    $('meq').textContent='$'+Math.round(meq/100).toLocaleString('en-US');
+    $('tot').textContent=Math.round(tot/100).toLocaleString('en-US');
+    $('v_tot').textContent='$'+Math.round(tot/100).toLocaleString('en-US');
+    $('roe').textContent=roe.toFixed(1)+'%'; $('ann').textContent=(roe/YEARS).toFixed(1)+'%';
+    $('v_cf').textContent=fmt(CFLOW); $('v_pp').textContent=fmt(PAYDOWN); $('v_ap').textContent=fmt(appr); $('v_tb').textContent=fmt(tb);
+    $('tbh').textContent=lu?('loss × '+tax+'%'):'deferred to sale';
+    const mx=Math.max(Math.abs(CFLOW),PAYDOWN,Math.abs(appr),tb,1);
+    bar('b_cf',CFLOW,mx); bar('b_pp',PAYDOWN,mx); bar('b_ap',appr,mx); bar('b_tb',tb,mx);
+  }
+  function bar(id,v,mx){const el=$(id);const w=Math.abs(v)/mx*100;el.style.width=w+'%';el.className='fill '+(v<0?'n':'p');el.style.right=v<0?'auto':'';el.style.left='0';}
+  function grad(el){const p=(el.value-el.min)/(el.max-el.min)*100;return `linear-gradient(90deg,var(--accent) 0 ${p}%, #EEEAE1 ${p}% 100%)`;}
+  ['cap','tax','lu'].forEach(id=>$(id).addEventListener('input',calc));
+  calc();
+</script>
+</body>
+</html>
