@@ -120,7 +120,12 @@ export async function deleteLoan(
 //
 //   WaveBalances opening entries (Balance Sheet CSV imports) are excluded
 //   from all queries — they double-count balances when Account Transactions
-//   are also present.
+//   are also present. The exclusion is NULL-SAFE (`IS DISTINCT FROM`): only
+//   genuine 'WaveBalances' headers are dropped. A plain `!= 'WaveBalances'`
+//   silently discards every NULL-qboTxnType row — which is EVERY plaid/
+//   plaid_auto entry (that column is QBO-only) — so the liability engine's
+//   recognized principal payments were vanishing from the paydown, understating
+//   it and disagreeing with the balance sheet. See the balance-sheet tie-out.
 //
 // Scenarios handled correctly:
 //
@@ -160,7 +165,9 @@ export async function computePaydownFromGL(
   }
 
   const ids = ltlAccounts.map((a) => a.id);
-  const notWaveBalances = sql`${bkJournalEntries.qboTxnType} != 'WaveBalances'`;
+  // NULL-safe: keeps NULL-qboTxnType rows (all plaid/plaid_auto postings),
+  // drops only real WaveBalances opening entries. `!=` would drop the NULLs too.
+  const notWaveBalances = sql`${bkJournalEntries.qboTxnType} IS DISTINCT FROM 'WaveBalances'`;
 
   // ── Step 1: Current balance for every LTL account ──────────────────────────
   const currentRows = await db
