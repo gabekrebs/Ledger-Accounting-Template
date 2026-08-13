@@ -15,6 +15,8 @@ import {
 } from "./actions";
 import { deleteManualEntryAction } from "./transactions/actions";
 import type { EditableTransaction } from "@/lib/ledger/edit-transaction";
+import { fmtDate } from "@/lib/ledger/format";
+import { useEntityReadOnly } from "./capabilities";
 
 /**
  * The one transaction-edit affordance, dropped into every surface that lists a
@@ -36,7 +38,9 @@ export function EditTransactionButton({
   edited?: boolean;
   className?: string;
 }) {
+  const readOnly = useEntityReadOnly();
   const [open, setOpen] = useState(false);
+  if (readOnly) return null; // viewers get no edit affordance anywhere
   return (
     <>
       <button
@@ -65,14 +69,6 @@ export function EditTransactionButton({
   );
 }
 
-/** "Apr 22, 2026" without timezone drift. */
-const MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split(" ");
-function fmtDate(iso: string): string {
-  const [y, m, d] = iso.slice(0, 10).split("-");
-  const mi = Number(m) - 1;
-  if (!y || mi < 0 || mi > 11) return iso;
-  return `${MONTHS[mi]} ${Number(d)}, ${y}`;
-}
 
 function EditPanel({
   entityId,

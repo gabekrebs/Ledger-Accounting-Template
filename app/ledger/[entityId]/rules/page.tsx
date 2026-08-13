@@ -2,7 +2,11 @@ import Link from "next/link";
 import { listRulesForEntity, precisionFor } from "@/lib/rules/store";
 import { listPostableAccounts } from "@/lib/plaid/data";
 import { CANONICAL } from "@/lib/ledger/canonical-accounts";
-import { currentUserIsAdmin } from "@/lib/ledger/access";
+import {
+  currentUserIsAdmin,
+  currentUserIsOwner,
+  currentUserEntityAccessLevel,
+} from "@/lib/ledger/access";
 import { Section } from "../section";
 import { RuleForm } from "./rule-form";
 import { ProposedRules } from "./proposed-rules";
@@ -45,7 +49,7 @@ function Badge({ children, tone = "muted" }: { children: React.ReactNode; tone?:
     tone === "green"
       ? "border-evergreen/40 text-evergreen"
       : tone === "amber"
-        ? "border-amber-500/40 text-amber-600"
+        ? "border-amber-500/40 text-amber-600 dark:text-amber-400"
         : "border-hair text-faint";
   return <span className={`rounded border px-1.5 py-0.5 text-[10px] ${cls}`}>{children}</span>;
 }
@@ -59,11 +63,14 @@ export default async function RulesPage({
 }) {
   const { entityId } = await params;
   const { merchant, category } = await searchParams;
-  const [all, postable, admin] = await Promise.all([
+  const [all, postable, admin, owner, accessLevel] = await Promise.all([
     listRulesForEntity(entityId),
     listPostableAccounts(entityId),
     currentUserIsAdmin(),
+    currentUserIsOwner(),
+    currentUserEntityAccessLevel(entityId),
   ]);
+  const readOnly = accessLevel !== "write";
   const entityRules = all.filter((r) => r.scope === "entity" && r.status === "active");
   const entityProposed = all.filter((r) => r.scope === "entity" && r.status === "proposed");
   const globalRules = all.filter((r) => r.scope === "global" && r.status === "active");
@@ -95,7 +102,7 @@ export default async function RulesPage({
             {conditionSummary(rule.predicate as ConditionGroup)} {actionSummary(rule.action as ActionSpec)}
           </div>
         </div>
-        {editable ? (
+        {editable && !readOnly ? (
           <Link href={`/ledger/${entityId}/rules/${rule.id}`} className="shrink-0 text-xs text-evergreen hover:underline">
             Edit →
           </Link>
@@ -108,10 +115,10 @@ export default async function RulesPage({
 
   return (
     <div className="space-y-10">
-      {proposedViews.length > 0 && (
+      {!readOnly && proposedViews.length > 0 && (
         <Section
           title="Proposed rules"
-          description="Authored from your history (and, soon, AI). Nothing posts until you approve — then the deterministic engine takes over."
+          description="Authored from your history, your accepted AI suggestions, and the AI author below. Nothing posts until you approve — then the deterministic engine takes over. Dismiss is remembered: a dismissed merchant only comes back if it shows new activity after the dismissal."
         >
           <ProposedRules
             rules={proposedViews}
@@ -146,32 +153,37 @@ export default async function RulesPage({
         </Section>
       )}
 
-      <Section
-        title="Author with AI"
-        description="Let AI propose rules from your recurring merchants, or describe one in plain English. AI only proposes — you approve."
-      >
-        <RuleAuthorTools
-          canonicalOptions={canonicalOptions}
-          accountOptions={accountOptions}
-          aiPropose={aiProposeRules.bind(null, entityId)}
-          nlDraft={nlDraftRule.bind(null, entityId)}
-          save={saveEntityRule.bind(null, entityId)}
-          preview={previewEntityRule.bind(null, entityId)}
-          redirectTo={`/ledger/${entityId}/rules`}
-        />
-      </Section>
+      {/* AI authoring spends model budget — owner only (actions re-assert). */}
+      {owner && (
+        <Section
+          title="Author with AI"
+          description="Let AI propose rules from your recurring merchants, or describe one in plain English. AI only proposes — you approve."
+        >
+          <RuleAuthorTools
+            canonicalOptions={canonicalOptions}
+            accountOptions={accountOptions}
+            aiPropose={aiProposeRules.bind(null, entityId)}
+            nlDraft={nlDraftRule.bind(null, entityId)}
+            save={saveEntityRule.bind(null, entityId)}
+            preview={previewEntityRule.bind(null, entityId)}
+            redirectTo={`/ledger/${entityId}/rules`}
+          />
+        </Section>
+      )}
 
-      <Section title="Add a rule" description="Author a deterministic rule, preview what it would do, then save.">
-        <RuleForm
-          scope="entity"
-          canonicalOptions={canonicalOptions}
-          accountOptions={accountOptions}
-          draft={merchant || category ? { merchant, categoryAccountId: category } : undefined}
-          save={saveEntityRule.bind(null, entityId)}
-          preview={previewEntityRule.bind(null, entityId)}
-          redirectTo={`/ledger/${entityId}/rules`}
-        />
-      </Section>
+      {!readOnly && (
+        <Section title="Add a rule" description="Author a deterministic rule, preview what it would do, then save.">
+          <RuleForm
+            scope="entity"
+            canonicalOptions={canonicalOptions}
+            accountOptions={accountOptions}
+            draft={merchant || category ? { merchant, categoryAccountId: category } : undefined}
+            save={saveEntityRule.bind(null, entityId)}
+            preview={previewEntityRule.bind(null, entityId)}
+            redirectTo={`/ledger/${entityId}/rules`}
+          />
+        </Section>
+      )}
     </div>
   );
 }

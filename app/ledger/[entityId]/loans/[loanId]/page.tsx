@@ -9,6 +9,7 @@ import { AmortizationChart } from "../amortization-chart";
 import { Button } from "@/components/ui/button";
 import { LoanForm } from "../loan-form";
 import { removeLoan } from "../actions";
+import { currentUserEntityAccessLevel } from "@/lib/ledger/access";
 
 export const dynamic = "force-dynamic";
 
@@ -20,6 +21,7 @@ export default async function LoanDetail({
   const { entityId, loanId } = await params;
   const loan = await getLoan(entityId, loanId);
   if (!loan) notFound();
+  const readOnly = (await currentUserEntityAccessLevel(entityId)) !== "write";
 
   const bals = await accountBalances(entityId);
   const liabilityAccounts = bals
@@ -156,14 +158,16 @@ export default async function LoanDetail({
         </div>
       </Section>
 
-      <Section title="Edit terms">
-        <LoanForm entityId={entityId} liabilityAccounts={liabilityAccounts} interestAccounts={interestAccounts} bankAccounts={bankAccounts} loan={loan} />
-        <form action={removeLoan} className="border-t border-hair pt-4">
-          <input type="hidden" name="entityId" value={entityId} />
-          <input type="hidden" name="loanId" value={loan.id} />
-          <Button type="submit" variant="destructive">Delete loan</Button>
-        </form>
-      </Section>
+      {!readOnly && (
+        <Section title="Edit terms">
+          <LoanForm entityId={entityId} liabilityAccounts={liabilityAccounts} interestAccounts={interestAccounts} bankAccounts={bankAccounts} loan={loan} />
+          <form action={removeLoan} className="border-t border-hair pt-4">
+            <input type="hidden" name="entityId" value={entityId} />
+            <input type="hidden" name="loanId" value={loan.id} />
+            <Button type="submit" variant="destructive">Delete loan</Button>
+          </form>
+        </Section>
+      )}
     </div>
   );
 }

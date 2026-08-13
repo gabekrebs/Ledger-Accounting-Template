@@ -73,6 +73,7 @@ export async function listMappableAccounts(entityId: string) {
     .where(
       and(
         eq(bkAccounts.entityId, entityId),
+        eq(bkAccounts.active, true), // archived accounts are not valid mapping targets
         inArray(bkAccounts.classification, ["asset", "liability"])
       )
     );
@@ -527,20 +528,6 @@ export async function getBookedBankLinesForAccounts(
     cents: Math.max(r.debitCents, r.creditCents),
     source: r.source,
   }));
-}
-
-/** Count of txns auto-suppressed as already-booked for an entity (UI note). */
-export async function countAlreadyBooked(entityId: string): Promise<number> {
-  const rows = await db
-    .select({ id: bkPlaidTransactions.id })
-    .from(bkPlaidTransactions)
-    .where(
-      and(
-        eq(bkPlaidTransactions.entityId, entityId),
-        eq(bkPlaidTransactions.status, "already_booked")
-      )
-    );
-  return rows.length;
 }
 
 /**

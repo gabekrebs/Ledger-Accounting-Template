@@ -6,6 +6,7 @@ import { resolvePlPeriod, comparisonRange, rangeParams, type CompareMode } from 
 import { Money } from "@/components/money";
 import { PlDateControls } from "../date-controls";
 import { EditTransactionButton } from "../../edit-transaction";
+import { variancePct } from "@/lib/ledger/format";
 
 export const dynamic = "force-dynamic";
 
@@ -65,11 +66,7 @@ export default async function PlDetailPage({
     return `${base}?${q.toString()}`;
   })();
 
-  const pct = (cur: number, prior: number) => {
-    if (!prior) return "—";
-    const v = ((cur - prior) / Math.abs(prior)) * 100;
-    return `${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(1)}%`;
-  };
+  const pct = (cur: number, prior: number) => variancePct(cur, prior) ?? "—";
 
   return (
     <div className="space-y-5">

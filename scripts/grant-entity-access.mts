@@ -2,10 +2,10 @@
  * Grant a user access to specific ledger entities (writes bk_entity_access).
  * Only needed for NON-admin users — admins (AUTH_ADMIN_EMAILS) see everything.
  *
- *   npx tsx scripts/grant-entity-access.mts --email=user@example.com --entities=acme,beta
+ *   npx tsx scripts/grant-entity-access.mts --email=partner@example.com --entities=glisan,salmon
  *
  * --entities accepts entity name substrings, realm ids, or the wave: slug tail
- * (e.g. "acme", "beta", "wave:acme-slug-tail", or a numeric mask). Idempotent:
+ * (e.g. "glisan", "salmon", "wave:glisan-ne-775", "1025"). Idempotent:
  * re-granting an existing pair is a no-op. Pass --list to print current grants
  * for the email instead of granting.
  */
@@ -31,7 +31,7 @@ const listOnly = args.includes("--list");
 
 if (!email) {
   console.error(
-    "usage: npx tsx scripts/grant-entity-access.mts --email=<e> --entities=acme,beta [--list]"
+    "usage: npx tsx scripts/grant-entity-access.mts --email=<e> --entities=glisan,salmon [--list]"
   );
   process.exit(1);
 }

@@ -36,10 +36,12 @@ export default async function Overview({
   params: Promise<{ entityId: string }>;
 }) {
   const { entityId } = await params;
-  const entity = await getEntity(entityId);
+  // Independent — fetch together instead of one after the other.
+  const [entity, stats] = await Promise.all([
+    getEntity(entityId),
+    ledgerStats(entityId),
+  ]);
   if (!entity) notFound();
-
-  const stats = await ledgerStats(entityId);
   const asOf = stats.lastDate ?? "2026-12-31";
   const firstYear = stats.firstDate ? +stats.firstDate.slice(0, 4) : 2022;
   const lastYear = stats.lastDate ? +stats.lastDate.slice(0, 4) : 2026;
@@ -185,14 +187,17 @@ export default async function Overview({
         (365.25 * 24 * 3600 * 1000)
       : 0;
   // Cost basis for appreciation = ALL fixed assets at cost (land + building +
-  // capitalized improvements + furniture/FF&E), gross of depreciation —
-  // straight from the fixed-asset accounts (per entity, no hardcoded numbers),
-  // so appreciation nets out every dollar put into the property.
+  // capitalized improvements + furniture/FF&E), gross of depreciation AND
+  // amortization — straight from the fixed-asset accounts (per entity, no
+  // hardcoded numbers), so appreciation nets out every dollar put into the
+  // property. Contra matching is by subtype pattern, not one exact string:
+  // charts carry AccumulatedDepreciation but also
+  // AccumulatedAmortizationOfOtherAssets (seen on the Kipuka mirror).
   const costBasisCents = lifeBals
     .filter(
       (b) =>
         b.accountType === "Fixed Asset" &&
-        b.accountSubtype !== "AccumulatedDepreciation"
+        !/accumulated/i.test(b.accountSubtype ?? "")
     )
     .reduce((s, b) => s + b.netCents, 0);
 
@@ -480,7 +485,7 @@ export default async function Overview({
           <Figure label="Current value" value={usd(currentValueCents)} note={valueNote} strong />
         </div>
         <div>
-          <div className="flex h-2.5 overflow-hidden rounded-full bg-[#EEEAE1]">
+          <div className="flex h-2.5 overflow-hidden rounded-full bg-[#EEEAE1] dark:bg-hair">
             <div className="bg-ink" style={{ width: `${debtPct}%` }} />
             <div className="bg-evergreen" style={{ width: `${equityPct}%` }} />
           </div>

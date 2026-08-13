@@ -25,7 +25,7 @@ export interface ParityEntry {
   accountId: string;
   samples: number;
   source: CandidateSource;
-  coverage: "active" | "proposed" | "uncovered";
+  coverage: "active" | "proposed" | "dismissed" | "uncovered";
 }
 
 export interface ParityReport {
@@ -33,6 +33,8 @@ export interface ParityReport {
   total: number;
   active: number;
   proposed: number;
+  /** Owner said "stop suggesting this merchant" — deliberately not covered. */
+  dismissed: number;
   uncovered: number;
   entries: ParityEntry[];
 }
@@ -57,6 +59,7 @@ export async function fingerprintParity(
     total: entries.length,
     active: entries.filter((e) => e.coverage === "active").length,
     proposed: entries.filter((e) => e.coverage === "proposed").length,
+    dismissed: entries.filter((e) => e.coverage === "dismissed").length,
     uncovered: entries.filter((e) => e.coverage === "uncovered").length,
     entries,
   };

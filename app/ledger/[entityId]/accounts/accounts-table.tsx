@@ -2,6 +2,8 @@
 
 import { useMemo, useState, useTransition, useDeferredValue } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { toast } from "sonner";
 import { Money } from "@/components/money";
 import { cn } from "@/lib/utils";
 import {
@@ -9,7 +11,7 @@ import {
   EditAccountButton,
   type ParentOption,
 } from "./manage-account";
-import { setAccountActivityAction } from "./actions";
+import { setAccountActivityAction, bulkArchiveAccountsAction } from "./actions";
 
 /** Shape the page hands us — a slice of AccountBalance + management fields. */
 export interface AccountRow {
@@ -37,6 +39,23 @@ const GROUP_LABEL: Record<string, string> = {
 
 type SortKey = "name" | "type" | "balance";
 type SortDir = "asc" | "desc";
+
+/**
+ * A balance-sheet account still holding money can't be archived (real position is
+ * never hidden); P&L accounts (revenue/expense) archive at any balance. Mirrors
+ * the server gate in setAccountActive. Module-scoped so it's a stable reference.
+ */
+function moneyOnHand(a: AccountRow): boolean {
+  return (
+    a.netCents !== 0 &&
+    (a.classification === "asset" ||
+      a.classification === "liability" ||
+      a.classification === "equity")
+  );
+}
+function archivable(a: AccountRow): a is AccountRow & { id: string } {
+  return !!a.id && a.active && !moneyOnHand(a);
+}
 
 /** Depth + leaf/prefix from a "Parent:Child:Leaf" qualified name. */
 function pathParts(a: AccountRow): { prefix: string[]; leaf: string } {
@@ -148,8 +167,14 @@ export function AccountsTable({
   const query = useDeferredValue(rawQuery);
   const [cls, setCls] = useState<string>("all");
   const [hideZero, setHideZero] = useState(false);
+  const [showArchived, setShowArchived] = useState(false);
   const [sortKey, setSortKey] = useState<SortKey>("name");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
+  const [archiveMode, setArchiveMode] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkPending, startBulk] = useTransition();
+  const router = useRouter();
+
 
   const allActivities = useMemo(() => {
     const set = new Set(accounts.map((a) => a.activity));
@@ -174,6 +199,10 @@ export function AccountsTable({
     const q = query.trim().toLowerCase();
     return accounts.filter((a) => {
       if (cls !== "all" && a.classification !== cls) return false;
+      // Archived accounts are hidden unless "Show archived" is on — EXCEPT a
+      // balance-sheet account that still holds money, which always shows (money
+      // is never hidden). A retired P&L account is hidden like any archived one.
+      if (!showArchived && !a.active && !moneyOnHand(a)) return false;
       if (hideZero && a.netCents === 0) return false;
       if (q) {
         const hay = `${a.fullyQualifiedName ?? a.name} ${a.accountType}`.toLowerCase();
@@ -181,7 +210,60 @@ export function AccountsTable({
       }
       return true;
     });
-  }, [accounts, query, cls, hideZero]);
+  }, [accounts, query, cls, hideZero, showArchived]);
+
+  // How many archived accounts are being hidden right now (for the toggle label).
+  const archivedHidden = useMemo(
+    () => accounts.filter((a) => !a.active && !moneyOnHand(a)).length,
+    [accounts]
+  );
+
+  // Archivable accounts among what's currently shown (drives select-all + the bar).
+  const eligibleShown = useMemo(
+    () => filtered.filter(archivable).map((a) => a.id),
+    [filtered]
+  );
+  const selectedCount = selected.size;
+  const allEligibleSelected =
+    eligibleShown.length > 0 && eligibleShown.every((id) => selected.has(id));
+
+  function toggleOne(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+  function toggleAll() {
+    setSelected((prev) => {
+      if (eligibleShown.every((id) => prev.has(id))) return new Set();
+      return new Set(eligibleShown);
+    });
+  }
+  function exitArchiveMode() {
+    setArchiveMode(false);
+    setSelected(new Set());
+  }
+  function archiveSelected() {
+    if (!selected.size) return;
+    startBulk(async () => {
+      const res = await bulkArchiveAccountsAction({
+        entityId,
+        accountIds: [...selected],
+      });
+      if (res.ok) {
+        toast.success(
+          `Archived ${res.archived} account${res.archived === 1 ? "" : "s"}` +
+            (res.failed ? ` · ${res.failed} skipped (not $0)` : "")
+        );
+        exitArchiveMode();
+        router.refresh();
+      } else {
+        toast.error(res.error ?? "Could not archive");
+      }
+    });
+  }
 
   const sorter = useMemo(() => {
     const dir = sortDir === "asc" ? 1 : -1;
@@ -241,7 +323,7 @@ export function AccountsTable({
   }
 
   const shown = filtered.length;
-  const hasInactive = filtered.some((a) => !a.active);
+  const hasInactive = filtered.some((a) => !a.active && moneyOnHand(a));
 
   return (
     <div className="space-y-5">
@@ -293,6 +375,32 @@ export function AccountsTable({
           />
           Hide $0
         </label>
+        {archivedHidden > 0 && (
+          <label className="flex cursor-pointer select-none items-center gap-1.5 text-sm text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={showArchived}
+              onChange={(e) => setShowArchived(e.target.checked)}
+              className="size-3.5 accent-evergreen"
+            />
+            Show archived{" "}
+            <span className="tabular-nums text-faint">({archivedHidden})</span>
+          </label>
+        )}
+        <button
+          type="button"
+          onClick={() => (archiveMode ? exitArchiveMode() : setArchiveMode(true))}
+          className={cn(
+            "inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-sm transition-colors",
+            archiveMode
+              ? "border-evergreen bg-evergreen-soft text-evergreen"
+              : "border-hair text-muted-foreground hover:border-evergreen/40 hover:text-evergreen"
+          )}
+          title="Select multiple $0 accounts and archive them at once"
+        >
+          <ArchiveIcon className="size-3.5" />
+          {archiveMode ? "Done" : "Archive accounts"}
+        </button>
         <NewAccountButton entityId={entityId} parents={parents} />
       </div>
 
@@ -311,6 +419,18 @@ export function AccountsTable({
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-hair text-[11px] font-medium uppercase tracking-[0.06em] text-faint">
+              {archiveMode && (
+                <th className="w-8 py-2 pl-1">
+                  <input
+                    type="checkbox"
+                    aria-label="Select all archivable accounts"
+                    checked={allEligibleSelected}
+                    disabled={eligibleShown.length === 0}
+                    onChange={toggleAll}
+                    className="size-3.5 accent-evergreen disabled:opacity-30"
+                  />
+                </th>
+              )}
               <SortTh
                 onClick={() => toggleSort("name")}
                 active={sortKey === "name"}
@@ -346,7 +466,7 @@ export function AccountsTable({
               {cls === "all" && (
                 <tr className="border-b border-hair/60">
                   <td
-                    colSpan={4}
+                    colSpan={archiveMode ? 5 : 4}
                     className="pt-5 pb-1.5 font-serif text-[13px] font-medium tracking-tight text-muted-foreground"
                   >
                     {g.label}
@@ -358,11 +478,35 @@ export function AccountsTable({
               )}
               {g.rows.map((a) => {
                 const { prefix, leaf } = pathParts(a);
+                const canArchive = archivable(a);
+                const isSel = !!a.id && selected.has(a.id);
                 return (
                   <tr
                     key={a.qboAccountId}
-                    className="group/row border-b border-hair/60"
+                    className={cn(
+                      "group/row border-b border-hair/60",
+                      archiveMode && isSel && "bg-evergreen-soft/40"
+                    )}
                   >
+                    {archiveMode && (
+                      <td className="w-8 py-2.5 pl-1">
+                        <input
+                          type="checkbox"
+                          aria-label={`Select ${a.name}`}
+                          checked={isSel}
+                          disabled={!canArchive}
+                          onChange={() => a.id && toggleOne(a.id)}
+                          title={
+                            canArchive
+                              ? undefined
+                              : a.active
+                                ? "Only $0-balance accounts can be archived"
+                                : "Already archived"
+                          }
+                          className="size-3.5 cursor-pointer accent-evergreen disabled:cursor-not-allowed disabled:opacity-25"
+                        />
+                      </td>
+                    )}
                     <td className="py-2.5">
                       <span className="inline-flex items-center gap-1">
                         <Link
@@ -378,7 +522,7 @@ export function AccountsTable({
                           <span className="group-hover:underline">{leaf}</span>
                           {!a.active && (
                             <span className="rounded bg-hair/60 px-1 py-px text-[10px] font-medium uppercase tracking-wide text-faint">
-                              inactive
+                              archived
                             </span>
                           )}
                         </Link>
@@ -414,7 +558,7 @@ export function AccountsTable({
               {/* Group subtotal */}
               <tr>
                 <td
-                  colSpan={3}
+                  colSpan={archiveMode ? 4 : 3}
                   className="border-t border-hair pt-2 pb-1 text-[11px] font-medium uppercase tracking-[0.06em] text-faint"
                 >
                   {g.label} subtotal
@@ -434,7 +578,7 @@ export function AccountsTable({
           {shown === accounts.length
             ? `${accounts.length} accounts`
             : `${shown} of ${accounts.length} accounts`}
-          {hasInactive ? " · includes inactive accounts that still hold a balance" : ""}
+          {hasInactive ? " · includes archived accounts that still hold a balance" : ""}
         </span>
         <span className="flex items-center gap-3">
           <span>
@@ -454,7 +598,60 @@ export function AccountsTable({
           )}
         </span>
       </div>
+
+      {/* Bulk-archive action bar — floats while selecting so it never scrolls off. */}
+      {archiveMode && (
+        <div className="fixed inset-x-0 bottom-6 z-40 flex justify-center px-4">
+          <div className="flex items-center gap-3 rounded-full border border-hair bg-background/95 px-4 py-2 shadow-lg backdrop-blur">
+            <span className="text-sm text-muted-foreground">
+              {selectedCount > 0 ? (
+                <>
+                  <span className="font-medium text-foreground tabular-nums">
+                    {selectedCount}
+                  </span>{" "}
+                  selected
+                </>
+              ) : (
+                "Select $0 accounts to archive"
+              )}
+            </span>
+            <button
+              type="button"
+              onClick={exitArchiveMode}
+              disabled={bulkPending}
+              className="rounded-full px-3 py-1 text-sm text-muted-foreground transition-colors hover:text-evergreen disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={archiveSelected}
+              disabled={selectedCount === 0 || bulkPending}
+              className="inline-flex items-center gap-1.5 rounded-full bg-evergreen px-3.5 py-1 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+            >
+              <ArchiveIcon className="size-3.5" />
+              {bulkPending
+                ? "Archiving…"
+                : `Archive${selectedCount ? ` ${selectedCount}` : ""}`}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
+  );
+}
+
+function ArchiveIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path
+        d="M2 4.5h12M3.2 4.5V13h9.6V4.5M2 2.5h12v2H2zM6.3 7.5h3.4"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }
 

@@ -11,7 +11,7 @@ import {
   parseAssignmentValue,
   settleAssignedEntity,
 } from "@/lib/plaid/assign";
-import { assertAdmin } from "@/lib/ledger/access";
+import { assertOwner } from "@/lib/ledger/access";
 import { suggestAccountMappings, type SuggestResult } from "@/lib/plaid/suggest";
 
 const { bkPlaidItems, bkPlaidAccounts, bkPlaidTransactions } = schema;
@@ -29,7 +29,7 @@ function revalidateAssignment(entityId: string | null) {
  * lib/plaid/assign.ts (tested); malformed values throw instead of unassigning.
  */
 export async function assignAccount(formData: FormData) {
-  await assertAdmin();
+  await assertOwner();
   const plaidAccountRowId = String(formData.get("plaidAccountRowId"));
   const { entityId, mappedAccountId } = parseAssignmentValue(
     String(formData.get("assignment") ?? "")
@@ -47,7 +47,7 @@ export async function assignAccount(formData: FormData) {
  * proposal via applySuggestion.
  */
 export async function suggestMappings(): Promise<SuggestResult> {
-  await assertAdmin();
+  await assertOwner();
   return suggestAccountMappings();
 }
 
@@ -60,7 +60,7 @@ export async function applySuggestion(
   entityId: string,
   accountId: string
 ) {
-  await assertAdmin();
+  await assertOwner();
   if (!plaidAccountRowId || !entityId || !accountId) return;
   await assignPlaidAccount(plaidAccountRowId, entityId, accountId);
   after(() => settleAssignedEntity(entityId));
@@ -75,14 +75,14 @@ export async function applySuggestion(
  * transactions those accounts left in the review inbox.
  *
  * Guard: refuses if any of the Item's transactions have already been POSTED to
- * a journal — those are real books. The admin must un-post them first, so we
+ * a journal — those are real books. The owner must un-post them first, so we
  * never silently orphan a journal entry. (The wrong-login case has nothing
  * posted, so it disconnects cleanly.)
  */
 export async function removeConnection(
   itemId: string
 ): Promise<{ ok: boolean; error?: string }> {
-  await assertAdmin();
+  await assertOwner();
   if (!itemId) return { ok: false, error: "Missing connection id" };
 
   const [item] = await db
@@ -153,7 +153,7 @@ export async function removeConnection(
 export async function replaceConnection(
   itemId: string
 ): Promise<{ ok: boolean; error?: string }> {
-  await assertAdmin();
+  await assertOwner();
   if (!itemId) return { ok: false, error: "Missing connection id" };
   const { markItemReplaced } = await import("@/lib/plaid/replace");
   const res = await markItemReplaced(itemId);

@@ -129,7 +129,7 @@ export function ValuationForm(props: {
         </fieldset>
 
         {method === "equity_stake" && (
-          <div className="space-y-3 rounded-xl border border-hair bg-[#FAF8F3] p-4">
+          <div className="space-y-3 rounded-xl border border-hair bg-[#FAF8F3] dark:bg-secondary p-4">
             <div className="grid gap-4 sm:grid-cols-2">
               <label className="block text-sm">
                 <span className="text-muted-foreground">Owns a share of</span>
@@ -161,7 +161,7 @@ export function ValuationForm(props: {
             <div>
               <h3 className="font-serif text-lg font-medium tracking-tight">What it&apos;s worth</h3>
               <p className="mt-0.5 text-xs text-muted-foreground">
-                The total is the sum of each piece below — a building, or any other asset like a vehicle or land.
+                The total is the sum of each piece below — a building, or any other asset like vehicles or land.
               </p>
             </div>
             <span className="text-right text-sm text-muted-foreground">
@@ -196,13 +196,13 @@ function AddComponentCard({ entityId }: { entityId: string }) {
             <form onSubmit={add.onSubmit} className="grid gap-3 px-4 pb-4 sm:grid-cols-2">
               <input type="hidden" name="entityId" value={entityId} />
               <Field label="Name">
-                <input name="label" placeholder="House — 123 Main St   ·   or “3 units”" className={inputCls} required />
+                <input name="label" placeholder="House — 123 Main St   ·   or “3 trailers”" className={inputCls} required />
               </Field>
               <Field label="Value (optional)">
                 <input name="value" inputMode="decimal" placeholder="$750,000" className={inputCls} />
               </Field>
               <Field label="Address (optional)">
-                <input name="address" placeholder="123 Main St, Anytown, ST 00000" className={inputCls} />
+                <input name="address" placeholder="123 Main St, Springfield, OR 97400" className={inputCls} />
               </Field>
               <div />
               <Field label="Zillow link (optional)">
@@ -218,7 +218,7 @@ function AddComponentCard({ entityId }: { entityId: string }) {
                 <span className="ml-2 text-xs text-faint" aria-live="polite">
                   {add.done
                     ? "Added ✓"
-                    : "A house? Paste its Zillow/Redfin links. Anything else (a vehicle, land, equipment)? Just give it a name and a value."}
+                    : "A house? Paste its Zillow/Redfin links. Anything else (vehicles, land, equipment)? Just give it a name and a value."}
                 </span>
               </div>
             </form>
@@ -287,7 +287,7 @@ function ComponentCard({ entityId, component: c }: { entityId: string; component
           ))}
         </div>
       ) : (
-        <p className="rounded-lg bg-[#FAF8F3] px-3 py-2 text-xs text-muted-foreground">
+        <p className="rounded-lg bg-[#FAF8F3] dark:bg-secondary px-3 py-2 text-xs text-muted-foreground">
           Enter your own comp below, or run an AI estimate. If you added Zillow/Redfin links, their figures
           will fill in on the next background refresh.
         </p>
@@ -311,7 +311,7 @@ function ComponentCard({ entityId, component: c }: { entityId: string; component
       </div>
 
       {showAi && (
-        <form onSubmit={ai.onSubmit} className="grid gap-3 rounded-xl border border-hair bg-[#FAF8F3] p-4 sm:grid-cols-3">
+        <form onSubmit={ai.onSubmit} className="grid gap-3 rounded-xl border border-hair bg-[#FAF8F3] dark:bg-secondary p-4 sm:grid-cols-3">
           <input type="hidden" name="entityId" value={entityId} />
           <input type="hidden" name="componentId" value={c.id} />
           <Field label="Address"><input name="address" defaultValue={c.address ?? ""} className={inputCls} required /></Field>

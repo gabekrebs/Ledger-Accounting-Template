@@ -41,6 +41,27 @@ export function getPlaid(): PlaidApi {
   return cached;
 }
 
+/**
+ * A SAFE, log/response-friendly summary of a Plaid error. NEVER log a raw Plaid
+ * SDK error: it is an AxiosError whose `.config` carries the request headers
+ * (PLAID-SECRET, PLAID-CLIENT-ID) and body (public_token), all of which
+ * `console.error(err)` would serialize into the logs. This reads only the Plaid
+ * RESPONSE error fields (non-secret) and falls back to the generic message.
+ */
+export function safePlaidError(err: unknown): string {
+  const e = err as {
+    response?: { status?: number; data?: { error_type?: string; error_code?: string } };
+    message?: string;
+  };
+  const code = e?.response?.data?.error_code;
+  const type = e?.response?.data?.error_type;
+  const status = e?.response?.status;
+  if (code || type) {
+    return `${type ?? "PlaidError"}/${code ?? "unknown"}${status ? ` (HTTP ${status})` : ""}`;
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
 export const PLAID_ENV = env();
 export const PLAID_PRODUCTS = [Products.Transactions];
 export const PLAID_COUNTRY_CODES = [CountryCode.Us];

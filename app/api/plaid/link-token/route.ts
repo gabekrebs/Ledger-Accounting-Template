@@ -7,9 +7,12 @@ import {
   PLAID_COUNTRY_CODES,
   plaidWebhookUrl,
   plaidRedirectUri,
+  safePlaidError,
 } from "@/lib/plaid/client";
 import { decryptToken } from "@/lib/plaid/crypto";
-import { currentUserIsAdmin } from "@/lib/ledger/access";
+import { currentUserIsOwner } from "@/lib/ledger/access";
+import { limitRoute } from "@/lib/security/rate-limit";
+import { actionIdentity } from "@/lib/security/rate-limit-identity";
 
 export const runtime = "nodejs";
 
@@ -35,10 +38,12 @@ export const runtime = "nodejs";
  * rejects `products` in update mode, so it's only sent on fresh links.
  */
 export async function POST(request: NextRequest) {
-  // Linking a bank is connection management — admins only.
-  if (!(await currentUserIsAdmin())) {
+  // Linking a bank is connection management — the owner only.
+  if (!(await currentUserIsOwner())) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
+  const limited = await limitRoute("plaidCredential", await actionIdentity());
+  if (limited) return limited;
   try {
     const body = await request.json().catch(() => ({}));
     const entityId: string | undefined = body?.entityId;
@@ -88,7 +93,7 @@ export async function POST(request: NextRequest) {
     });
     return NextResponse.json({ link_token: resp.data.link_token });
   } catch (err) {
-    console.error("plaid/link-token:", err);
+    console.error("plaid/link-token:", safePlaidError(err));
     return NextResponse.json(
       { error: "Could not create link token" },
       { status: 500 }

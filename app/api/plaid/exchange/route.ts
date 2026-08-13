@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { and, eq, ne } from "drizzle-orm";
 import { db, schema } from "@/lib/db/client";
-import { getPlaid, PLAID_COUNTRY_CODES } from "@/lib/plaid/client";
+import { getPlaid, PLAID_COUNTRY_CODES, safePlaidError } from "@/lib/plaid/client";
 import { encryptToken } from "@/lib/plaid/crypto";
-import { currentUserIsAdmin } from "@/lib/ledger/access";
+import { currentUserIsOwner } from "@/lib/ledger/access";
+import { limitRoute } from "@/lib/security/rate-limit";
+import { actionIdentity } from "@/lib/security/rate-limit-identity";
 
 export const runtime = "nodejs";
 
@@ -21,12 +23,14 @@ const { bkPlaidItems, bkPlaidAccounts } = schema;
  * the accounts.
  */
 export async function POST(request: NextRequest) {
-  // Persisting a bank connection is connection management — admins only.
-  if (!(await currentUserIsAdmin())) {
+  // Persisting a bank connection is connection management — the owner only.
+  if (!(await currentUserIsOwner())) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
+  const limited = await limitRoute("plaidCredential", await actionIdentity());
+  if (limited) return limited;
   try {
-    // `force` (admin-only, NOT exposed in the normal UI) bypasses the duplicate-
+    // `force` (owner-only like the whole route, NOT exposed in the normal UI) bypasses the duplicate-
     // Item block below for the rare case of a genuinely separate second login at
     // the same institution.
     const { public_token, entityId, force } = await request.json();
@@ -64,7 +68,7 @@ export async function POST(request: NextRequest) {
     // (non-replaced) Item already exists for this institution, refuse to create a
     // second one — a re-link with a different account selection would otherwise
     // spawn a duplicate Item for the same login, and some banks (e.g. Chase)
-    // invalidate the prior Item when re-linked. The admin is steered to Update
+    // invalidate the prior Item when re-linked. The owner is steered to Update
     // Mode ("Update / add accounts") on the existing connection instead. The
     // replace flow is exempt: it tombstones the old Item to status 'replaced'
     // BEFORE re-linking, so it isn't counted here.
@@ -210,7 +214,7 @@ export async function POST(request: NextRequest) {
       synced,
     });
   } catch (err) {
-    console.error("plaid/exchange:", err);
+    console.error("plaid/exchange:", safePlaidError(err));
     return NextResponse.json(
       { error: "Could not link bank connection" },
       { status: 500 }

@@ -1,5 +1,9 @@
 import { notFound } from "next/navigation";
-import { assertEntityAccess } from "@/lib/ledger/access";
+import {
+  assertEntityAccess,
+  currentUserIsAdmin,
+  currentUserEntityAccessLevel,
+} from "@/lib/ledger/access";
 import { getEntity } from "@/lib/ledger/reports";
 import { listDocuments, signedUrl } from "@/lib/ledger/documents";
 import { Section } from "../section";
@@ -35,7 +39,14 @@ export default async function DocumentsPage({
   await assertEntityAccess(entityId);
   const entity = await getEntity(entityId);
   if (!entity) notFound();
-  const docs = await listDocuments(entityId);
+  // Read-only users may VIEW and share/download documents, never manage them;
+  // deletion stays admin-only (tax PII). Server actions re-assert both.
+  const [admin, accessLevel, docs] = await Promise.all([
+    currentUserIsAdmin(),
+    currentUserEntityAccessLevel(entityId),
+    listDocuments(entityId),
+  ]);
+  const canUpload = accessLevel === "write";
   // Short-lived view URLs generated server-side (the bucket is private).
   const urls = new Map(
     await Promise.all(docs.map(async (d) => [d.id, await signedUrl(entityId, d.id, 3600)] as const))
@@ -47,6 +58,11 @@ export default async function DocumentsPage({
         title="Documents"
         description="Settlement statements, 1098s, insurance, tax returns — stored privately, shareable with your CPA via a time-limited link."
       >
+        {!canUpload ? (
+          <p className="text-sm text-muted-foreground">
+            You can view and download this entity&apos;s documents below.
+          </p>
+        ) : (
         <form action={uploadDocumentAction} className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 items-end">
           <input type="hidden" name="entityId" value={entityId} />
           <label className="block text-sm sm:col-span-2 lg:col-span-1">
@@ -73,6 +89,7 @@ export default async function DocumentsPage({
             <Button type="submit">Upload</Button>
           </div>
         </form>
+        )}
       </Section>
 
       <Section title="Stored documents" description={`${docs.length} document${docs.length === 1 ? "" : "s"}.`}>
@@ -108,11 +125,13 @@ export default async function DocumentsPage({
                   <td className="py-2.5">
                     <div className="flex items-center justify-end gap-3">
                       <ShareButton entityId={entityId} docId={d.id} />
-                      <form action={deleteDocumentAction}>
-                        <input type="hidden" name="entityId" value={entityId} />
-                        <input type="hidden" name="docId" value={d.id} />
-                        <button type="submit" className="text-xs text-muted-foreground hover:text-oxblood">Delete</button>
-                      </form>
+                      {admin && (
+                        <form action={deleteDocumentAction}>
+                          <input type="hidden" name="entityId" value={entityId} />
+                          <input type="hidden" name="docId" value={d.id} />
+                          <button type="submit" className="text-xs text-muted-foreground hover:text-oxblood">Delete</button>
+                        </form>
+                      )}
                     </div>
                   </td>
                 </tr>

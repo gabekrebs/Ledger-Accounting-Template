@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { assertAdmin } from "@/lib/ledger/access";
 import { listGlobalRules, listProposedGlobal, precisionFor } from "@/lib/rules/store";
+import { listBuckets, UNLOCK_MIN_OUTCOMES, UNLOCK_MIN_PRECISION } from "@/lib/ai/calibration";
 import { listEntities } from "@/lib/ledger/reports";
 import { CANONICAL } from "@/lib/ledger/canonical-accounts";
 import { RuleForm } from "../[entityId]/rules/rule-form";
@@ -28,10 +29,11 @@ function summary(predicate: ConditionGroup, action: ActionSpec): string {
 
 export default async function GlobalRulesPage() {
   await assertAdmin(); // global rules affect every entity — admin only
-  const [rules, proposed, entities] = await Promise.all([
+  const [rules, proposed, entities, buckets] = await Promise.all([
     listGlobalRules(),
     listProposedGlobal(),
     listEntities(),
+    listBuckets(),
   ]);
   const previewEntities = entities.map((e) => ({ id: e.id, name: e.name ?? "(unnamed)" }));
   const proposedViews = proposed.map((r) => ({
@@ -44,7 +46,7 @@ export default async function GlobalRulesPage() {
 
   return (
     <main className="flex-1 px-6 py-8">
-      <div className="mx-auto w-full max-w-5xl space-y-10">
+      <div className="mx-auto w-full max-w-page space-y-10">
         <div>
           <Link href="/ledger" className="text-sm text-faint hover:text-muted-foreground">
             ← Ledger
@@ -60,13 +62,68 @@ export default async function GlobalRulesPage() {
           <section className="space-y-2">
             <h2 className="font-serif text-lg font-medium">Proposed global rules</h2>
             <p className="text-sm text-muted-foreground">
-              AI-authored proposals. Nothing posts until you approve.
+              AI-authored proposals. Nothing posts until you approve. Dismiss is
+              remembered: a dismissed merchant only comes back if it shows new
+              activity after the dismissal.
             </p>
             <ProposedRules
               rules={proposedViews}
               approve={approveGlobalRule}
               dismiss={dismissGlobalRule}
             />
+          </section>
+        )}
+
+        {buckets.length > 0 && (
+          <section className="space-y-2">
+            <h2 className="font-serif text-lg font-medium">AI automation buckets</h2>
+            <p className="max-w-prose text-sm text-muted-foreground">
+              Measured accuracy of AI suggestions by evidence class. A bucket
+              earns unattended posting at ≥{Math.round(UNLOCK_MIN_PRECISION * 100)}%
+              precision over ≥{UNLOCK_MIN_OUTCOMES} of your decisions (under
+              $1,000, amount-checked); one undo locks it again.
+            </p>
+            <table className="w-full max-w-2xl text-sm">
+              <thead>
+                <tr className="border-b border-hair text-[11px] font-medium uppercase tracking-[0.06em] text-faint">
+                  <th className="py-2 text-left font-medium">Bucket</th>
+                  <th className="py-2 text-right font-medium">Decisions</th>
+                  <th className="py-2 text-right font-medium">Precision</th>
+                  <th className="py-2 text-right font-medium">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {buckets.map((b) => (
+                  <tr key={b.bucketKey} className="border-b border-hair/60">
+                    <td className="py-2 font-mono text-xs">{b.bucketKey}</td>
+                    <td className="py-2 text-right tabular-nums">{b.outcomes}</td>
+                    <td className="py-2 text-right tabular-nums">
+                      {b.measuredPrecision != null
+                        ? `${Math.round(b.measuredPrecision * 100)}%`
+                        : "—"}
+                    </td>
+                    <td className="py-2 text-right">
+                      <span
+                        className={
+                          b.status === "unlocked"
+                            ? "rounded-full border border-evergreen/40 px-2 py-0.5 text-[11px] text-evergreen"
+                            : b.status === "locked"
+                              ? "rounded-full border border-hair px-2 py-0.5 text-[11px] text-oxblood"
+                              : "rounded-full border border-hair px-2 py-0.5 text-[11px] text-faint"
+                        }
+                        title={b.lockReason ?? undefined}
+                      >
+                        {b.status === "unlocked"
+                          ? "auto-posting"
+                          : b.status === "locked"
+                            ? "locked"
+                            : "shadow"}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </section>
         )}
 
@@ -86,7 +143,7 @@ export default async function GlobalRulesPage() {
                         <span className={`rounded border px-1.5 py-0.5 text-[10px] ${r.autoApply ? "border-evergreen/40 text-evergreen" : "border-hair text-faint"}`}>
                           {r.autoApply ? "auto" : "propose"}
                         </span>
-                        {!r.enabled && <span className="rounded border border-amber-500/40 px-1.5 py-0.5 text-[10px] text-amber-600">disabled</span>}
+                        {!r.enabled && <span className="rounded border border-amber-500/40 px-1.5 py-0.5 text-[10px] text-amber-600 dark:text-amber-400">disabled</span>}
                         <span className="rounded border border-hair px-1.5 py-0.5 text-[10px] text-faint">{Math.round(precisionFor(r) * 100)}%</span>
                       </div>
                       <div className="truncate text-xs text-faint">

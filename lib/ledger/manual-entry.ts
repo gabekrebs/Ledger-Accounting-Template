@@ -88,7 +88,7 @@ export async function createManualEntry(
     for (const id of ids) {
       const a = byId.get(id);
       if (!a) throw new Error("an account does not belong to this entity");
-      if (!a.active) throw new Error("an account is inactive — reactivate it first");
+      if (!a.active) throw new Error("an account is archived — restore it first");
     }
 
     const [entry] = await tx

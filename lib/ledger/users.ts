@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { db } from "@/lib/db/client";
 import { bkAppUsers, bkEntityAccess, bkLedgerEntities } from "@/lib/db/schema";
 import { getServerSupabase } from "@/lib/supabase/server";
@@ -16,7 +16,18 @@ import { isEnvAdmin } from "@/lib/ledger/access";
  * password is generated) and removal here never deletes the auth account.
  */
 
-export type AppRole = "admin" | "member";
+// 'owner' is the admin/account owner; 'accountant' and 'business_partner' are
+// the per-entity collaborator classifications. 'admin'/'member' are legacy
+// values kept valid for back-compat (owner ≡ admin for capability).
+export type AppRole =
+  | "owner"
+  | "accountant"
+  | "business_partner"
+  | "admin"
+  | "member";
+
+/** Per-entity capability granted to a collaborator. */
+export type EntityAccessLevel = "read" | "write";
 
 export type AppUserWithGrants = {
   id: string;
@@ -26,7 +37,7 @@ export type AppUserWithGrants = {
   active: boolean;
   createdAt: Date | null;
   createdBy: string | null;
-  entities: { id: string; name: string | null }[];
+  entities: { id: string; name: string | null; accessLevel: EntityAccessLevel }[];
 };
 
 function normalizeEmail(email: string): string {
@@ -56,14 +67,23 @@ export async function listAppUsers(): Promise<AppUserWithGrants[]> {
     id: u.id,
     email: u.email,
     displayName: u.displayName,
-    role: (u.role === "admin" ? "admin" : "member") as AppRole,
+    role: (u.role ?? "business_partner") as AppRole,
     active: u.active,
     createdAt: u.createdAt,
     createdBy: u.createdBy,
     entities: grants
       .filter((g) => g.userEmail === u.email)
-      .map((g) => entityById.get(g.entityId))
-      .filter((e): e is { id: string; name: string | null } => !!e)
+      .map((g) => {
+        const e = entityById.get(g.entityId);
+        return e
+          ? {
+              id: e.id,
+              name: e.name,
+              accessLevel: (g.accessLevel === "write" ? "write" : "read") as EntityAccessLevel,
+            }
+          : null;
+      })
+      .filter((e): e is { id: string; name: string | null; accessLevel: EntityAccessLevel } => !!e)
       .sort((a, b) => (a.name ?? "").localeCompare(b.name ?? "")),
   }));
 }
@@ -116,7 +136,7 @@ export async function createAppUser(input: {
   email: string;
   displayName?: string | null;
   role: AppRole;
-  entityIds: string[];
+  entityGrants: { entityId: string; accessLevel: EntityAccessLevel }[];
   createdBy: string | null;
 }): Promise<{ tempPassword: string | null; reusedExistingLogin: boolean }> {
   const email = normalizeEmail(input.email);
@@ -146,38 +166,50 @@ export async function createAppUser(input: {
     }
   }
 
+  // Split the entered name so first_name is populated for greetings etc. — the
+  // first word is the first name, the remainder the last name. Email is never
+  // used as a name source.
+  const displayName = input.displayName?.trim() || null;
+  const nameParts = displayName ? displayName.split(/\s+/) : [];
   await db.insert(bkAppUsers).values({
     email,
-    displayName: input.displayName?.trim() || null,
+    displayName,
+    firstName: nameParts[0] ?? null,
+    lastName: nameParts.length > 1 ? nameParts.slice(1).join(" ") : null,
     role: input.role,
     createdBy: input.createdBy,
   });
 
-  if (input.role === "member" && input.entityIds.length > 0) {
+  // Owner/admin see everything (no per-entity rows); collaborators get exactly
+  // the granted entities at their chosen level.
+  const isOwnerRole = input.role === "owner" || input.role === "admin";
+  if (!isOwnerRole && input.entityGrants.length > 0) {
     await db
       .insert(bkEntityAccess)
-      .values(input.entityIds.map((entityId) => ({ userEmail: email, entityId })))
-      .onConflictDoNothing();
+      .values(
+        input.entityGrants.map((g) => ({
+          userEmail: email,
+          entityId: g.entityId,
+          accessLevel: g.accessLevel,
+        }))
+      )
+      .onConflictDoUpdate({
+        target: [bkEntityAccess.userEmail, bkEntityAccess.entityId],
+        set: { accessLevel: sql`excluded.access_level` },
+      });
   }
 
   return { tempPassword: reusedExistingLogin ? null : password, reusedExistingLogin };
 }
 
-export async function setUserRole(userId: string, role: AppRole): Promise<void> {
-  await db.update(bkAppUsers).set({ role }).where(eq(bkAppUsers.id, userId));
-}
-
-export async function setUserActive(
+/**
+ * Replace a user's ENTIRE set of entity grants with the given levels: entities
+ * not in the list are revoked, the rest are upserted at their level. The single
+ * write path the Users screen's "Save access" uses.
+ */
+export async function setUserEntityLevels(
   userId: string,
-  active: boolean
-): Promise<void> {
-  await db.update(bkAppUsers).set({ active }).where(eq(bkAppUsers.id, userId));
-}
-
-/** Replace a user's entity grants with exactly `entityIds`. */
-export async function setUserEntities(
-  userId: string,
-  entityIds: string[]
+  grants: { entityId: string; accessLevel: EntityAccessLevel }[]
 ): Promise<void> {
   const user = await db
     .select({ email: bkAppUsers.email })
@@ -187,20 +219,27 @@ export async function setUserEntities(
   if (!user[0]) throw new Error("User not found.");
   const email = user[0].email;
 
+  const want = new Set(grants.map((g) => g.entityId));
   const current = await db
     .select({ entityId: bkEntityAccess.entityId })
     .from(bkEntityAccess)
     .where(eq(bkEntityAccess.userEmail, email));
-  const want = new Set(entityIds);
-  const have = new Set(current.map((r) => r.entityId));
-  const toAdd = entityIds.filter((id) => !have.has(id));
-  const toRemove = [...have].filter((id) => !want.has(id));
+  const toRemove = current.map((r) => r.entityId).filter((id) => !want.has(id));
 
-  if (toAdd.length > 0) {
+  if (grants.length > 0) {
     await db
       .insert(bkEntityAccess)
-      .values(toAdd.map((entityId) => ({ userEmail: email, entityId })))
-      .onConflictDoNothing();
+      .values(
+        grants.map((g) => ({
+          userEmail: email,
+          entityId: g.entityId,
+          accessLevel: g.accessLevel,
+        }))
+      )
+      .onConflictDoUpdate({
+        target: [bkEntityAccess.userEmail, bkEntityAccess.entityId],
+        set: { accessLevel: sql`excluded.access_level` },
+      });
   }
   if (toRemove.length > 0) {
     await db
@@ -214,12 +253,45 @@ export async function setUserEntities(
   }
 }
 
-/** Grant one entity to an email (used by the per-entity Access tab). */
-export async function grantEntity(email: string, entityId: string): Promise<void> {
+/** The target user's CURRENT role — lets the action layer refuse touching owner-tier rows. */
+export async function getUserRole(userId: string): Promise<AppRole | null> {
+  const [row] = await db
+    .select({ role: bkAppUsers.role })
+    .from(bkAppUsers)
+    .where(eq(bkAppUsers.id, userId))
+    .limit(1);
+  return (row?.role as AppRole) ?? null;
+}
+
+export async function setUserRole(userId: string, role: AppRole): Promise<void> {
+  await db.update(bkAppUsers).set({ role }).where(eq(bkAppUsers.id, userId));
+}
+
+export async function setUserActive(
+  userId: string,
+  active: boolean
+): Promise<void> {
+  await db.update(bkAppUsers).set({ active }).where(eq(bkAppUsers.id, userId));
+}
+
+
+/**
+ * Grant one entity to an email at a given access level (read | write). Upserts:
+ * re-granting an existing entity UPDATES the level, so the Access tab can promote
+ * read → write (or demote) without a revoke/re-grant round-trip.
+ */
+export async function grantEntity(
+  email: string,
+  entityId: string,
+  accessLevel: EntityAccessLevel = "read"
+): Promise<void> {
   await db
     .insert(bkEntityAccess)
-    .values({ userEmail: normalizeEmail(email), entityId })
-    .onConflictDoNothing();
+    .values({ userEmail: normalizeEmail(email), entityId, accessLevel })
+    .onConflictDoUpdate({
+      target: [bkEntityAccess.userEmail, bkEntityAccess.entityId],
+      set: { accessLevel },
+    });
 }
 
 /** Revoke one entity from an email. */

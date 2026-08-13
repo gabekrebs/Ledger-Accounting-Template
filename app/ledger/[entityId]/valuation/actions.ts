@@ -1,7 +1,10 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { assertEntityAccess, canAccessEntity } from "@/lib/ledger/access";
+import { assertEntityWrite, assertOwner, canAccessEntity } from "@/lib/ledger/access";
+import { logAudit } from "@/lib/ledger/audit";
+import { limitAction } from "@/lib/security/rate-limit";
+import { actionIdentity } from "@/lib/security/rate-limit-identity";
 import { getCurrentUser } from "@/lib/supabase/auth-server";
 import {
   updateValuation,
@@ -16,17 +19,8 @@ import {
 } from "@/lib/ledger/valuation";
 import { estimateValueWithAi } from "@/lib/ledger/ai-valuation";
 import type { ValuationMethod } from "@/lib/ledger/reports";
+import { str, dollarsToCents } from "@/lib/ledger/forms";
 
-function str(v: FormDataEntryValue | null): string | null {
-  const s = String(v ?? "").trim();
-  return s.length ? s : null;
-}
-function dollarsToCents(v: FormDataEntryValue | null): number | null {
-  const raw = String(v ?? "").replace(/[$,]/g, "").trim();
-  if (!raw) return null;
-  const n = parseFloat(raw);
-  return Number.isFinite(n) ? Math.round(n * 100) : null;
-}
 function revalidate(entityId: string) {
   revalidatePath(`/ledger/${entityId}/valuation`);
   revalidatePath(`/ledger/${entityId}`);
@@ -34,7 +28,7 @@ function revalidate(entityId: string) {
 
 export async function saveMethod(formData: FormData) {
   const entityId = String(formData.get("entityId"));
-  await assertEntityAccess(entityId);
+  await assertEntityWrite(entityId);
   const method = (String(formData.get("method")) || "income") as ValuationMethod;
   const pct = str(formData.get("ownershipPct"));
   const parentEntityId =
@@ -53,12 +47,21 @@ export async function saveMethod(formData: FormData) {
     parentEntityId,
     ownershipPct: method === "equity_stake" && pct ? parseFloat(pct) : null,
   });
+  await logAudit({
+    entityId,
+    actionType: "set_valuation_method",
+    objectTable: "bk_ledger_entities",
+    objectId: entityId,
+    description: `Set valuation method to "${method}"`,
+    after: { method },
+    affectedLedger: false,
+  });
   revalidate(entityId);
 }
 
 export async function saveComponent(formData: FormData) {
   const entityId = String(formData.get("entityId"));
-  await assertEntityAccess(entityId);
+  await assertEntityWrite(entityId);
   const componentId = str(formData.get("componentId"));
   const fields = {
     label: str(formData.get("label")) ?? "Property",
@@ -73,7 +76,8 @@ export async function saveComponent(formData: FormData) {
     });
   } else {
     const newId = await addComponent(entityId, fields);
-    // Optional starting value — lets a non-listing asset (a vehicle, land, etc.) be added with its worth in one step, no Zillow/Redfin needed.
+    // Optional starting value — lets a non-listing asset (vehicles, land, an
+    // RV) be added with its worth in one step, no Zillow/Redfin needed.
     const cents = dollarsToCents(formData.get("value"));
     if (cents != null) {
       await setEstimate(entityId, newId, "manual", cents, {
@@ -85,20 +89,38 @@ export async function saveComponent(formData: FormData) {
   // implies the method, so the owner doesn't have to also remember the separate
   // method save (forgetting it left the piece orphaned + the method reverting).
   await setValuationMethod(entityId, "market");
+  await logAudit({
+    entityId,
+    actionType: componentId ? "update_valuation_component" : "add_valuation_component",
+    objectTable: "bk_valuation_components",
+    objectId: componentId,
+    description: `${componentId ? "Updated" : "Added"} a valuation component "${fields.label}"`,
+    after: fields,
+    affectedLedger: false,
+  });
   revalidate(entityId);
 }
 
 export async function removeComponent(formData: FormData) {
   const entityId = String(formData.get("entityId"));
-  await assertEntityAccess(entityId);
-  await deleteComponent(entityId, String(formData.get("componentId")));
+  await assertEntityWrite(entityId);
+  const removedComponentId = String(formData.get("componentId"));
+  await deleteComponent(entityId, removedComponentId);
+  await logAudit({
+    entityId,
+    actionType: "remove_valuation_component",
+    objectTable: "bk_valuation_components",
+    objectId: removedComponentId,
+    description: "Removed a valuation component",
+    affectedLedger: false,
+  });
   revalidate(entityId);
 }
 
 /** Manual comp value for a component. */
 export async function saveManualEstimate(formData: FormData) {
   const entityId = String(formData.get("entityId"));
-  await assertEntityAccess(entityId);
+  await assertEntityWrite(entityId);
   const componentId = String(formData.get("componentId"));
   const cents = dollarsToCents(formData.get("value"));
   if (cents != null) {
@@ -106,14 +128,27 @@ export async function saveManualEstimate(formData: FormData) {
       asOf: str(formData.get("asOf")) ?? new Date().toISOString().slice(0, 10),
       reasoning: str(formData.get("note")),
     });
+    await logAudit({
+      entityId,
+      actionType: "save_manual_estimate",
+      objectTable: "bk_valuation_estimates",
+      objectId: componentId,
+      description: `Set a manual valuation estimate ($${(cents / 100).toLocaleString()})`,
+      after: { valueCents: cents },
+      affectedLedger: false,
+    });
   }
   revalidate(entityId);
 }
 
-/** Run the AI estimate for a component from a few owner-entered facts. */
+/** Run the AI estimate for a component from a few owner-entered facts.
+ * OWNER-ONLY (AI spend); entity-scoping still asserted for the 404 semantics. */
 export async function runAiEstimate(formData: FormData) {
   const entityId = String(formData.get("entityId"));
-  await assertEntityAccess(entityId);
+  await assertOwner();
+  await assertEntityWrite(entityId);
+  const rl = await limitAction("ai", await actionIdentity());
+  if (rl) throw new Error(rl.error);
   const componentId = String(formData.get("componentId"));
   const address = str(formData.get("address"));
   if (!address) {
@@ -158,6 +193,15 @@ export async function runAiEstimate(formData: FormData) {
   await setEstimate(entityId, componentId, "ai", ai.valueCents, {
     asOf: new Date().toISOString().slice(0, 10),
     reasoning: ai.reasoning,
+  });
+  await logAudit({
+    entityId,
+    actionType: "run_ai_estimate",
+    objectTable: "bk_valuation_estimates",
+    objectId: componentId,
+    description: `Ran an AI valuation estimate ($${(ai.valueCents / 100).toLocaleString()})`,
+    after: { valueCents: ai.valueCents },
+    affectedLedger: false,
   });
   revalidate(entityId);
 }

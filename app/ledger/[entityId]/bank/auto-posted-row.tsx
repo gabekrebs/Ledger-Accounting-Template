@@ -23,9 +23,12 @@ export type AutoPostedTxn = {
 export function AutoPostedRow({
   entityId,
   txn,
+  readOnly = false,
 }: {
   entityId: string;
   txn: AutoPostedTxn;
+  /** Read-only viewer: no Undo (unpost is a ledger write). */
+  readOnly?: boolean;
 }) {
   const [busy, start] = useTransition();
   const router = useRouter();
@@ -58,9 +61,11 @@ export function AutoPostedRow({
         <Money cents={-txn.amountCents} tone="auto" />
       </td>
       <td className="py-3 pl-3 text-right">
-        <Button size="sm" variant="ghost" onClick={undo} disabled={busy}>
-          {busy ? "Undoing…" : "Undo"}
-        </Button>
+        {!readOnly && (
+          <Button size="sm" variant="ghost" onClick={undo} disabled={busy}>
+            {busy ? "Undoing…" : "Undo"}
+          </Button>
+        )}
       </td>
     </tr>
   );

@@ -1,6 +1,7 @@
 import { searchTransactions, ledgerStats } from "@/lib/ledger/reports";
 import { TransactionsTable } from "./transactions-table";
 import { NewEntryButton } from "./new-entry";
+import { NewExpenseButton } from "./new-expense";
 
 export const dynamic = "force-dynamic";
 
@@ -27,7 +28,10 @@ export default async function TransactionsPage({
           Every journal entry for this entity. Search, filter by type or period,
           and sort any column — click an account to open its ledger.
         </p>
-        <NewEntryButton entityId={entityId} />
+        <div className="flex shrink-0 gap-2">
+          <NewExpenseButton entityId={entityId} />
+          <NewEntryButton entityId={entityId} />
+        </div>
       </div>
       <TransactionsTable
         entityId={entityId}

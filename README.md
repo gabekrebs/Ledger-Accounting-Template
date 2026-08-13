@@ -27,8 +27,16 @@ double-entry journal** that always balances.
   path, balance enforced (optionally at the DB layer too).
 - **Reports** — P&L, balance sheet, general ledger, reconciliation, property
   valuation, document storage, Wave-CSV history import.
+- **Review & automation trust** — a cross-entity, mobile-friendly review queue,
+  owner "heads-up" holds, per-merchant outlier gates, and an evidence ledger
+  that lets AI suggestions *earn* unattended posting (measured precision,
+  small caps, one undo re-locks).
+- **Reconciliation & close** — per-account book-vs-bank health with honest
+  "settling" windows, statement ties, and trial-balance XLSX export for your
+  accountant. Light and dark mode.
 - **Security-first** — Row-Level-Security lockdown, fail-closed machine-endpoint
-  auth, encrypted Plaid tokens, owner-only entity creation, tight CSP.
+  auth, encrypted Plaid tokens, webhook signature verification, targeted rate
+  limiting, owner-only entity creation, tight CSP.
 
 ## Stack
 

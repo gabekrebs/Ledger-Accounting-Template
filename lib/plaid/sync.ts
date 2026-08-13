@@ -1,11 +1,11 @@
-import { eq, and, inArray, isNotNull, sql } from "drizzle-orm";
+import { eq, and, inArray, isNotNull, ne, sql } from "drizzle-orm";
 import type { Transaction } from "plaid";
 import { db, schema } from "@/lib/db/client";
 import { getPlaid } from "@/lib/plaid/client";
 import { decryptToken } from "@/lib/plaid/crypto";
 import { reconcileBookedExactMatches } from "@/lib/plaid/reconcile";
 
-const { bkPlaidItems, bkPlaidAccounts, bkPlaidTransactions } = schema;
+const { bkPlaidItems, bkPlaidAccounts, bkPlaidTransactions, bkAuditLog } = schema;
 
 type ItemRow = typeof bkPlaidItems.$inferSelect;
 
@@ -39,6 +39,71 @@ function toRow(entityId: string | null, t: Transaction) {
 }
 
 /**
+ * Surface (never apply) Plaid changes to transactions we already posted or
+ * ignored. Their staged financial fields are frozen (see the upsert's WHERE),
+ * so when the bank's version of amount/date/name diverges from what the books
+ * were written from, this files a `plaid_source_drift` row in the owner's
+ * review log (/teamactivity) instead of silently mutating anything.
+ * Best-effort: a logging failure must never abort the sync.
+ */
+async function flagPostedDrift(txns: Transaction[]): Promise<void> {
+  try {
+    const frozen = await db
+      .select({
+        id: bkPlaidTransactions.id,
+        plaidTransactionId: bkPlaidTransactions.plaidTransactionId,
+        entityId: bkPlaidTransactions.entityId,
+        status: bkPlaidTransactions.status,
+        txnDate: bkPlaidTransactions.txnDate,
+        name: bkPlaidTransactions.name,
+        amountCents: bkPlaidTransactions.amountCents,
+      })
+      .from(bkPlaidTransactions)
+      .where(
+        and(
+          inArray(
+            bkPlaidTransactions.plaidTransactionId,
+            txns.map((t) => t.transaction_id)
+          ),
+          ne(bkPlaidTransactions.status, "pending_review")
+        )
+      );
+    if (!frozen.length) return;
+    const incoming = new Map(txns.map((t) => [t.transaction_id, t]));
+    for (const row of frozen) {
+      const t = incoming.get(row.plaidTransactionId);
+      if (!t || !row.entityId) continue;
+      const newCents = toCents(t.amount);
+      const changes: string[] = [];
+      if (newCents !== Number(row.amountCents)) {
+        changes.push(
+          `amount $${(Number(row.amountCents) / 100).toFixed(2)} → $${(newCents / 100).toFixed(2)}`
+        );
+      }
+      if (t.date !== row.txnDate) changes.push(`date ${row.txnDate} → ${t.date}`);
+      if ((t.name ?? null) !== row.name) changes.push(`descriptor changed`);
+      if (!changes.length) continue;
+      await db.insert(bkAuditLog).values({
+        actorEmail: "plaid-sync",
+        actorRole: "system",
+        entityId: row.entityId,
+        actionType: "plaid_source_drift",
+        objectTable: "bk_plaid_transactions",
+        objectId: row.id,
+        description:
+          `Bank changed a ${row.status} transaction ("${row.name ?? "?"}", ` +
+          `${row.txnDate}) after it was booked: ${changes.join("; ")}. ` +
+          `The books were left untouched — review and correct manually if needed.`,
+        afterJson: { plaidTransactionId: row.plaidTransactionId, changes },
+        affectedLedger: true,
+      });
+    }
+  } catch (e) {
+    console.error("plaid sync: drift flagging failed:", e);
+  }
+}
+
+/**
  * Pull all new/changed transactions for one linked Item via Plaid's cursor-based
  * /transactions/sync, into the bk_plaid_transactions staging inbox. Idempotent:
  * upserts on plaid_transaction_id, persists the cursor so each run is a delta.
@@ -49,7 +114,14 @@ function toRow(entityId: string | null, t: Transaction) {
  * pending_review (a posted one would need a reversing entry — milestone 2).
  */
 export async function syncItemTransactions(item: ItemRow): Promise<{
+  /** Rows actually WRITTEN to staging from Plaid's `added` delta — bank-pending
+   * and sync-excluded transactions are filtered before storage, and frozen
+   * (posted/ignored) rows are never rewritten, so this is smaller than Plaid's
+   * raw count whenever any were skipped. */
   added: number;
+  /** Rows actually UPDATED in staging from Plaid's `modified` delta (same
+   * filtering; a modified txn hitting a frozen row counts 0 and is surfaced by
+   * flagPostedDrift instead). */
   modified: number;
   removed: number;
 }> {
@@ -57,16 +129,22 @@ export async function syncItemTransactions(item: ItemRow): Promise<{
   const accessToken = decryptToken(item.accessToken);
 
   // account_id → assigned entity (null = unassigned). Rebuilt each sync so a
-  // reassignment is reflected on the next pull.
+  // reassignment is reflected on the next pull. sync_excluded accounts (e.g. a
+  // personal card a bank login forced along) are never stored at all.
   const accts = await db
     .select({
       plaidAccountId: bkPlaidAccounts.plaidAccountId,
       entityId: bkPlaidAccounts.entityId,
+      syncExcluded: bkPlaidAccounts.syncExcluded,
     })
     .from(bkPlaidAccounts)
     .where(eq(bkPlaidAccounts.itemId, item.id));
   const entityForAccount = new Map<string, string | null>();
-  for (const a of accts) entityForAccount.set(a.plaidAccountId, a.entityId);
+  const excludedAccounts = new Set<string>();
+  for (const a of accts) {
+    entityForAccount.set(a.plaidAccountId, a.entityId);
+    if (a.syncExcluded) excludedAccounts.add(a.plaidAccountId);
+  }
 
   let cursor = item.txnCursor ?? undefined;
   let added = 0;
@@ -86,14 +164,33 @@ export async function syncItemTransactions(item: ItemRow): Promise<{
       // thousands of rows, and per-row round-trips made the drain outlive the
       // serverless time cap (the cursor only persists after a COMPLETE drain,
       // so a timeout meant nothing was saved, ever). `excluded.*` keeps upsert
-      // semantics identical to the old per-row version; `status` is never in
-      // the set, so a posted/suppressed row keeps its state.
-      const upsertBatch = async (txns: Transaction[]) => {
-        if (!txns.length) return;
+      // semantics identical to the old per-row version.
+      //
+      // Only rows still `pending_review` accept updates (the WHERE below): a
+      // posted/ignored row's financial fields are FROZEN — the journal was
+      // written from them, and Plaid silently rewriting amount/date/name under
+      // a posted entry would desync the books from their source. When Plaid
+      // does change a settled txn after we posted it, flagPostedDrift() surfaces
+      // it on /teamactivity as a review concern instead.
+      //
+      // Bank-PENDING transactions are never stored (owner request 2026-07-21,
+      // Wave/QuickBooks behavior): they can change amount or vanish, so they
+      // must not appear anywhere in the system. The settled version arrives
+      // later as its own transaction_id and enters staging normally; a
+      // cancelled pending simply never existed here.
+      // Returns the number of rows the statement actually wrote (inserted or
+      // updated) — filtered-out and frozen rows don't count, so the totals the
+      // caller reports are stored counts, not raw Plaid delta sizes.
+      const upsertBatch = async (txns: Transaction[]): Promise<number> => {
+        txns = txns.filter(
+          (t) => !excludedAccounts.has(t.account_id) && !t.pending
+        );
+        if (!txns.length) return 0;
+        await flagPostedDrift(txns);
         const rows = txns.map((t) =>
           toRow(entityForAccount.get(t.account_id) ?? null, t)
         );
-        await db
+        const res = await db
           .insert(bkPlaidTransactions)
           .values(rows)
           .onConflictDoUpdate({
@@ -110,12 +207,12 @@ export async function syncItemTransactions(item: ItemRow): Promise<{
               raw: sql`excluded.raw`,
               updatedAt: sql`excluded.updated_at`,
             },
+            setWhere: sql`${bkPlaidTransactions.status} = 'pending_review'`,
           });
+        return res.count ?? rows.length;
       };
-      await upsertBatch(data.added);
-      added += data.added.length;
-      await upsertBatch(data.modified);
-      modified += data.modified.length;
+      added += await upsertBatch(data.added);
+      modified += await upsertBatch(data.modified);
       const removedIds = data.removed
         .map((r) => r.transaction_id)
         .filter((id): id is string => !!id);
@@ -129,6 +226,27 @@ export async function syncItemTransactions(item: ItemRow): Promise<{
             )
           );
         removed += res.count ?? removedIds.length;
+      }
+
+      // Pending→settled reconciliation. A SETTLED transaction carries
+      // `pending_transaction_id` pointing at the pending row it replaces.
+      // New pending rows are no longer stored (filter above), so this delete
+      // is a safety net for any legacy pending row still in staging. Only
+      // pending_review rows are touched (a posted/already_booked one is left as
+      // is), so this can never unpost real money.
+      const supersededIds = [...data.added, ...data.modified]
+        .map((t) => t.pending_transaction_id)
+        .filter((id): id is string => !!id);
+      if (supersededIds.length) {
+        const res = await db
+          .delete(bkPlaidTransactions)
+          .where(
+            and(
+              inArray(bkPlaidTransactions.plaidTransactionId, supersededIds),
+              eq(bkPlaidTransactions.status, "pending_review")
+            )
+          );
+        removed += res.count ?? 0;
       }
 
       cursor = data.next_cursor;

@@ -12,11 +12,13 @@ import {
 
 /**
  * Phase 3b — portfolio category suggestions via the Anthropic Batch API (50%
- * off, async). The threshold cron submits ONE job covering every entity's
- * leftover transactions (one batch request per entity, custom_id = entity_id),
- * records it in `bk_category_batches`, and a later cron run polls + ingests the
- * results into the persisted `suggested_*` columns. Two-phase because the Batch
- * API is asynchronous — results land minutes-to-hours later, across cron runs.
+ * off, async), on the same Opus 4.8 evidence pipeline as the interactive path
+ * (prepareCategorization builds one identical request shape for both). The
+ * threshold cron submits ONE job covering every entity's leftover transactions
+ * (one batch request per entity, custom_id = entity_id), records it in
+ * `bk_category_batches`, and a later cron run polls + ingests the results into
+ * the persisted `suggested_*` columns. Two-phase because the Batch API is
+ * asynchronous — results land minutes-to-hours later, across cron runs.
  *
  * The free history pre-pass still runs at SUBMIT time and is persisted
  * immediately (no token cost); only the genuine unknowns go into the batch.
@@ -64,7 +66,11 @@ export async function submitCategoryBatch(): Promise<SubmitResult> {
     const prep = await prepareCategorization(entityId);
     // Free history suggestions: persist now, no batch needed.
     if (prep.historySuggestions.length) {
-      historyPersisted += await persistSuggestions(prep.historySuggestions);
+      historyPersisted += await persistSuggestions(
+        entityId,
+        prep.historySuggestions,
+        prep.evidenceByTxn
+      );
     }
     if (prep.requestParams) {
       requests.push({
@@ -166,7 +172,9 @@ export async function ingestCategoryBatches(): Promise<IngestResult> {
           validIds,
           accountLabelById
         );
-        written += await persistSuggestions(suggestions);
+        // No submit-time evidence survives to ingest — persist rebuilds a
+        // minimal snapshot from the txn row (conservative "new" bucket).
+        written += await persistSuggestions(entityId, suggestions);
       }
 
       await db

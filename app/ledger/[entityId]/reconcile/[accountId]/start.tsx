@@ -9,6 +9,7 @@ import {
   startReconciliationAction,
   undoLastReconciliationAction,
 } from "../actions";
+import { useEntityReadOnly } from "../../capabilities";
 
 /** "1,234.56" / "-58.20" → integer cents; null when invalid. */
 function parseCents(s: string): number | null {
@@ -30,6 +31,7 @@ export function StartReconciliation({
   lastStatement: ReconciliationSummary | null;
 }) {
   const router = useRouter();
+  const readOnly = useEntityReadOnly();
   const [statementDate, setStatementDate] = useState("");
   const [balance, setBalance] = useState("");
   const [busy, startTransition] = useTransition();
@@ -54,6 +56,7 @@ export function StartReconciliation({
     });
   }
 
+  if (readOnly) return null; // viewers can't run a statement tie
   return (
     <div className="max-w-md space-y-4 rounded-xl border border-hair p-5">
       <div>
@@ -113,6 +116,7 @@ export function UndoLastReconciliation({
   accountId: string;
 }) {
   const router = useRouter();
+  const readOnly = useEntityReadOnly();
   const [confirm, setConfirm] = useState(false);
   const [busy, startTransition] = useTransition();
 
@@ -128,6 +132,7 @@ export function UndoLastReconciliation({
     });
   }
 
+  if (readOnly) return null; // viewers can't undo reconciliations
   return confirm ? (
     <Button variant="destructive" size="sm" disabled={busy} onClick={undo}>
       Confirm undo

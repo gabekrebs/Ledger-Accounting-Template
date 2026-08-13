@@ -24,7 +24,7 @@ export default async function EditGlobalRulePage({
 
   return (
     <main className="flex-1 px-6 py-8">
-      <div className="mx-auto w-full max-w-5xl space-y-10">
+      <div className="mx-auto w-full max-w-page space-y-10">
         <div>
           <Link href="/ledger/rules" className="text-sm text-faint hover:text-muted-foreground">
             ← Global rules

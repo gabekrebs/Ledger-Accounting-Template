@@ -10,6 +10,7 @@ import {
   updateAccountAction,
   setAccountActiveAction,
 } from "./actions";
+import { useEntityReadOnly } from "../capabilities";
 
 /**
  * Chart-of-accounts management UI — "New account" (toolbar) and a per-row edit
@@ -58,7 +59,9 @@ export function NewAccountButton({
   entityId: string;
   parents: ParentOption[];
 }) {
+  const readOnly = useEntityReadOnly();
   const [open, setOpen] = useState(false);
+  if (readOnly) return null; // viewers can't add accounts
   return (
     <>
       <Button size="sm" onClick={() => setOpen(true)}>
@@ -90,7 +93,9 @@ export function EditAccountButton({
   entityId: string;
   account: EditableAccount;
 }) {
+  const readOnly = useEntityReadOnly();
   const [open, setOpen] = useState(false);
+  if (readOnly) return null; // viewers can't edit accounts
   return (
     <>
       <button
@@ -147,6 +152,14 @@ function AccountPanel({
 
   const cls = CLASS_OF_TYPE[accountType];
   const eligibleParents = parents.filter((p) => p.classification === cls);
+  // P&L accounts (revenue/expense) archive at any balance; balance-sheet accounts
+  // need $0 (mirrors the server gate). Use the account's PERSISTED type.
+  const existingCls = existing ? CLASS_OF_TYPE[existing.accountType] : undefined;
+  const canArchiveExisting =
+    !!existing &&
+    (existing.netCents === 0 ||
+      existingCls === "revenue" ||
+      existingCls === "expense");
   const dirty = existing
     ? name.trim() !== existing.name || accountType !== existing.accountType
     : name.trim() !== "";
@@ -185,7 +198,7 @@ function AccountPanel({
         active,
       });
       if (res.ok) {
-        toast.success(active ? "Account reactivated" : "Account deactivated");
+        toast.success(active ? "Account restored" : "Account archived");
         router.refresh();
         onClose();
       } else {
@@ -274,8 +287,9 @@ function AccountPanel({
           )}
           {existing && !existing.active && (
             <p className="text-xs text-faint">
-              This account is inactive — it&apos;s hidden from pickers and $0
-              reports but its history is intact.
+              This account is archived — hidden from pickers and current
+              reports, but its history stays intact and still appears on
+              statements for periods it was active.
             </p>
           )}
         </div>
@@ -290,21 +304,21 @@ function AccountPanel({
                   disabled={busy}
                   onClick={() => setActive(false)}
                 >
-                  Confirm deactivate
+                  Confirm archive
                 </Button>
               ) : (
                 <Button
                   variant="ghost"
                   size="sm"
-                  disabled={busy || existing.netCents !== 0}
+                  disabled={busy || !canArchiveExisting}
                   title={
-                    existing.netCents !== 0
-                      ? "Only $0-balance accounts can be deactivated"
+                    !canArchiveExisting
+                      ? "Only $0-balance accounts can be archived"
                       : undefined
                   }
                   onClick={() => setConfirmDeactivate(true)}
                 >
-                  Deactivate
+                  Archive
                 </Button>
               )
             ) : (
@@ -314,7 +328,7 @@ function AccountPanel({
                 disabled={busy}
                 onClick={() => setActive(true)}
               >
-                Reactivate
+                Restore
               </Button>
             ))}
           <div className="ml-auto flex items-center gap-2">

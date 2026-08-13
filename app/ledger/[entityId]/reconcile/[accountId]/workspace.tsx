@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { Money } from "@/components/money";
 import { Button } from "@/components/ui/button";
+import { useEntityReadOnly } from "../../capabilities";
 import { cn } from "@/lib/utils";
 import type { RecWorkspace } from "@/lib/ledger/reconcile";
 
@@ -36,6 +37,7 @@ export function RecWorkspaceView({
   initial: RecWorkspace;
 }) {
   const router = useRouter();
+  const readOnly = useEntityReadOnly();
   const { rec, account, lines, truncated } = initial;
   const [checked, setChecked] = useState<Set<string>>(
     () => new Set(lines.filter((l) => l.checked).map((l) => l.lineId))
@@ -53,6 +55,7 @@ export function RecWorkspaceView({
   }, [checked, lines, rec, account.normalBalance]);
 
   function toggle(lineIds: string[], cleared: boolean) {
+    if (readOnly) return; // viewers can watch, never change cleared state
     // Optimistic; reconciled state is re-read on refresh/finish.
     setChecked((prev) => {
       const next = new Set(prev);
@@ -134,7 +137,7 @@ export function RecWorkspaceView({
           </Stat>
         </div>
         <div className="flex items-center gap-2">
-          {confirmCancel ? (
+          {readOnly ? null : confirmCancel ? (
             <Button variant="destructive" size="sm" disabled={busy} onClick={cancel}>
               Confirm cancel
             </Button>
@@ -148,9 +151,11 @@ export function RecWorkspaceView({
               Cancel
             </Button>
           )}
-          <Button size="sm" disabled={busy || !balanced} onClick={finish}>
-            {balanced ? "Finish reconciliation" : "Difference must be $0.00"}
-          </Button>
+          {!readOnly && (
+            <Button size="sm" disabled={busy || !balanced} onClick={finish}>
+              {balanced ? "Finish reconciliation" : "Difference must be $0.00"}
+            </Button>
+          )}
         </div>
       </div>
 

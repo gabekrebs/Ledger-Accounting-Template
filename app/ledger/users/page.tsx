@@ -32,7 +32,7 @@ export default async function UsersPage() {
 
   return (
     <main className="flex-1 px-6 py-12">
-      <div className="mx-auto w-full max-w-4xl space-y-8">
+      <div className="mx-auto w-full max-w-page space-y-8">
         <div>
           <Link
             href="/"

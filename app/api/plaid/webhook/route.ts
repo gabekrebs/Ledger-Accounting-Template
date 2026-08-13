@@ -5,9 +5,16 @@ import { db, schema } from "@/lib/db/client";
 import { syncItemTransactions } from "@/lib/plaid/sync";
 import { autoPostEntity } from "@/lib/plaid/auto-post";
 import { isAuthorizedPlaidWebhook } from "@/lib/security/machine-auth";
+import { verifyPlaidWebhook, type WebhookVerifyResult } from "@/lib/plaid/webhook-verify";
+import { safePlaidError } from "@/lib/plaid/client";
+import { limitRoute, clientIp } from "@/lib/security/rate-limit";
 
 export const runtime = "nodejs";
-export const maxDuration = 120;
+// 300s is the Hobby-plan (fluid compute) ceiling. One Chase login feeds ~20
+// entities, and the post-sync auto-post loop below runs INSIDE this budget —
+// at 120s it repeatedly died mid-portfolio, leaving the tail entities'
+// transactions uncategorized until the next day's cron.
+export const maxDuration = 300;
 
 const { bkPlaidItems, bkPlaidAccounts } = schema;
 
@@ -38,30 +45,70 @@ function shouldAutoPost(entityId: string): boolean {
  * Plaid POSTs a TRANSACTIONS / SYNC_UPDATES_AVAILABLE webhook when data is ready
  * (and on every later update); we react by pulling the delta for that Item.
  *
- * Auth: the receiver is gated by the dedicated PLAID_WEBHOOK_SECRET token in
- * the query string (set on the per-Item webhook URL at link time — see
- * plaidWebhookUrl()). Fail-closed: an unset/blank secret rejects every call.
- * The secret is webhook-only — CRON_SECRET authorizes only /api/cron/* and
- * never rides in a URL registered with a third party. Full Plaid JWT
- * verification (Plaid-Verification header + /webhook_verification_key/get) is
- * the recommended follow-up; the blast radius here is small — the endpoint only
- * triggers an idempotent sync of an Item we already own and returns no data.
+ * Auth: three layers, in order below — (1) a per-IP abuse cap, (2) the
+ * dedicated PLAID_WEBHOOK_SECRET token in the query string (set on the
+ * per-Item webhook URL at link time — see plaidWebhookUrl(); fail-closed: an
+ * unset/blank secret rejects every call), and (3) official Plaid JWT
+ * verification (Plaid-Verification header + /webhook_verification_key/get),
+ * staged via PLAID_WEBHOOK_VERIFY = off | log | enforce. The secret is
+ * webhook-only — CRON_SECRET authorizes only /api/cron/* and never rides in a
+ * URL registered with a third party. Blast radius is small either way: the
+ * endpoint only triggers an idempotent sync of an Item we already own and
+ * returns no data.
  *
  * Acks 200 fast; the sync runs in after() so Plaid's delivery doesn't time out
  * (Plaid retries non-2xx, which our idempotent upsert tolerates).
  */
 export async function POST(request: NextRequest) {
+  // (1) Cheap pre-verification abuse cap on the TRUSTED client IP — never on
+  // item_id, which is attacker-controllable before verification. Generous and
+  // fail-open, so legitimate Plaid bursts/retries are never throttled.
+  const limited = await limitRoute("webhookAbuse", `ip:${clientIp(request.headers)}`);
+  if (limited) return limited;
+
+  // (2) Belt-and-braces shared-secret gate (fail-closed; unchanged).
   if (!isAuthorizedPlaidWebhook(request.nextUrl.searchParams.get("token"))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  // Read the RAW body ONCE. The JWT body-hash is over these exact bytes, and we
+  // only JSON.parse AFTER verification — no downstream work on unverified input.
+  const raw = await request.text();
+
+  // (3) Official Plaid JWT verification, gated by PLAID_WEBHOOK_VERIFY:
+  //   off     → skip (default; preserves prior behavior)
+  //   log     → verify + record the reason category, but still accept
+  //   enforce → reject unverified webhooks with a generic 401
+  // Runs BEFORE the DB lookup below. Never logs the JWT/body/secret/claims.
+  const mode = (process.env.PLAID_WEBHOOK_VERIFY ?? "off").toLowerCase();
+  if (mode === "log" || mode === "enforce") {
+    let v: WebhookVerifyResult;
+    try {
+      v = await verifyPlaidWebhook(request.headers.get("plaid-verification"), raw);
+    } catch {
+      // The verifier is internally fail-safe, but never let an unexpected error
+      // here disrupt delivery — treat it as a failure category, don't crash.
+      v = { ok: false, reason: "invalid_signature" };
+    }
+    if (v.ok) {
+      // Positive confirmation so log-mode observation is unambiguous before enforce.
+      if (mode === "log") console.log("plaid/webhook: verification passed (log mode)");
+    } else {
+      console.warn(`plaid/webhook: verification failed reason=${v.reason} mode=${mode}`);
+      if (mode === "enforce") {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      }
+    }
+  }
+
+  // (4) Parse JSON from the already-read raw body.
   let body: {
     webhook_type?: string;
     webhook_code?: string;
     item_id?: string;
   };
   try {
-    body = await request.json();
+    body = JSON.parse(raw);
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
@@ -108,7 +155,7 @@ export async function POST(request: NextRequest) {
       );
     } catch (e) {
       // syncItemTransactions already records status=error + lastError on the Item.
-      console.error(`plaid/webhook: sync failed for item=${item.id}:`, e);
+      console.error(`plaid/webhook: sync failed for item=${item.id}:`, safePlaidError(e));
     }
 
     // H1: real-time categorization (TODO H1 / ADR-011). Run the deterministic
@@ -124,6 +171,13 @@ export async function POST(request: NextRequest) {
         .where(
           and(eq(bkPlaidAccounts.itemId, item.id), isNotNull(bkPlaidAccounts.entityId))
         );
+      // Shuffle: if the function times out mid-loop, a fixed order starves the
+      // SAME tail entities on every run. Random order + idempotent poster means
+      // repeated webhooks/crons converge on full coverage instead.
+      for (let i = assigned.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [assigned[i], assigned[j]] = [assigned[j], assigned[i]];
+      }
       for (const { entityId } of assigned) {
         if (!entityId || !shouldAutoPost(entityId)) continue;
         const r = await autoPostEntity(entityId);

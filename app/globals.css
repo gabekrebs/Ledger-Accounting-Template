@@ -5,6 +5,13 @@
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
+  /* THE page width (`max-w-page`) — every content page shares it so tab
+   * changes never shift the column. Sized so the widest ledger nav (an entity
+   * with the By Address tab — measured 1054px rendered) ends flush with the
+   * page edge; form/auth pages keep their own narrower columns. Adding a tab
+   * (or widening a label) means remeasuring this. */
+  --container-page: 66rem;
+
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
@@ -104,37 +111,49 @@
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  /* The statement palette at night — same warm hues, values inverted. Paper
+   * becomes a warm charcoal (never blue-black), ink becomes warm off-white,
+   * and the two accents brighten just enough to hold ~4:1 contrast both as
+   * text on the page and as button fills under white labels. */
+  --paper: #161411;          /* warm near-black — the page */
+  --ink: #ece9e2;            /* warm off-white — primary text */
+  --faint: #918d82;          /* demoted figures, captions */
+  --hair: #2d2a23;           /* hairline rules */
+  --evergreen: #3f8a67;      /* brightened for dark ground */
+  --evergreen-soft: color-mix(in oklab, #3f8a67 14%, transparent);
+  --oxblood: #c0604b;        /* brightened terracotta-oxblood */
+
+  --background: var(--paper);
+  --foreground: var(--ink);
+  --card: #1d1a16;
+  --card-foreground: var(--ink);
+  --popover: #211e19;
+  --popover-foreground: var(--ink);
+  --primary: var(--evergreen);
+  --primary-foreground: #faf8f4;
+  --secondary: #2b2720;
+  --secondary-foreground: var(--ink);
+  --muted: #2b2720;
+  --muted-foreground: #a5a196;
+  --accent: #2b2720;
+  --accent-foreground: var(--ink);
+  --destructive: var(--oxblood);
+  --border: var(--hair);
+  --input: #37332a;
+  --ring: var(--evergreen);
+  --chart-1: var(--evergreen);
+  --chart-2: #a5a196;
+  --chart-3: #c39a72;
+  --chart-4: var(--oxblood);
+  --chart-5: #4a453c;
+  --sidebar: #1d1a16;
+  --sidebar-foreground: var(--ink);
+  --sidebar-primary: var(--evergreen);
+  --sidebar-primary-foreground: #faf8f4;
+  --sidebar-accent: #2b2720;
+  --sidebar-accent-foreground: var(--ink);
+  --sidebar-border: var(--hair);
+  --sidebar-ring: var(--evergreen);
 }
 
 @layer base {
@@ -169,7 +188,7 @@ input[type="range"].rng::-webkit-slider-thumb {
   height: 15px;
   border-radius: 50%;
   background: var(--evergreen);
-  border: 2px solid #fff;
+  border: 2px solid var(--card); /* #fff in light; themed ring in dark */
   box-shadow: 0 1px 3px #00000026;
 }
 input[type="range"].rng::-moz-range-thumb {
@@ -177,6 +196,6 @@ input[type="range"].rng::-moz-range-thumb {
   height: 15px;
   border-radius: 50%;
   background: var(--evergreen);
-  border: 2px solid #fff;
+  border: 2px solid var(--card);
   box-shadow: 0 1px 3px #00000026;
 }

@@ -238,24 +238,29 @@ export async function setAccountActivity(input: {
     .where(eq(bkAccounts.id, input.accountId));
 }
 
-/** Bulk-update activity for multiple accounts at once. */
-export async function bulkSetAccountActivity(input: {
+
+/**
+ * Bulk archive / restore. Loops {@link setAccountActive} per id so each account
+ * re-runs the same guards (deactivation needs a $0 balance + no active children).
+ * Never all-or-nothing: an ineligible account is collected in `failed` with its
+ * reason and the rest still apply. Returns how many changed + which were skipped.
+ */
+export async function bulkSetAccountActive(input: {
   entityId: string;
   accountIds: string[];
-  activity: string;
-}): Promise<number> {
-  const activity = input.activity.trim();
-  if (!activity) throw new Error("activity cannot be empty");
-  if (!input.accountIds.length) return 0;
-  let updated = 0;
+  active: boolean;
+}): Promise<{ changed: number; failed: { accountId: string; error: string }[] }> {
+  const failed: { accountId: string; error: string }[] = [];
+  let changed = 0;
   for (const accountId of input.accountIds) {
-    await db
-      .update(bkAccounts)
-      .set({ activity, updatedAt: new Date() })
-      .where(and(eq(bkAccounts.id, accountId), eq(bkAccounts.entityId, input.entityId)));
-    updated++;
+    try {
+      await setAccountActive({ entityId: input.entityId, accountId, active: input.active });
+      changed++;
+    } catch (e) {
+      failed.push({ accountId, error: e instanceof Error ? e.message : String(e) });
+    }
   }
-  return updated;
+  return { changed, failed };
 }
 
 /** Get distinct activity tags used by an entity's accounts. */
@@ -269,8 +274,13 @@ export async function getEntityActivities(entityId: string): Promise<string[]> {
 }
 
 /**
- * Deactivate / reactivate. Deactivation requires a $0 net balance (money can
- * never be hidden) and no active sub-accounts. Reactivation is always allowed.
+ * Deactivate / reactivate. Deactivating a BALANCE-SHEET account (asset /
+ * liability / equity) requires a $0 net balance — real financial position is
+ * never hidden. P&L accounts (revenue / expense) carry a lifetime cumulative
+ * total rather than a current balance, so they can be archived at any balance
+ * (a retired category still appears on statements for the periods it was used).
+ * Either way, an account with active sub-accounts can't be archived first.
+ * Reactivation is always allowed.
  */
 export async function setAccountActive(input: {
   entityId: string;
@@ -289,16 +299,24 @@ export async function setAccountActive(input: {
     if (acct.active === input.active) return;
 
     if (!input.active) {
-      const [{ net }] = await tx
-        .select({
-          net: sql<string>`COALESCE(SUM(${schema.bkJournalLines.debitCents} - ${schema.bkJournalLines.creditCents}), 0)`,
-        })
-        .from(schema.bkJournalLines)
-        .where(eq(schema.bkJournalLines.accountId, acct.id));
-      if (Number(net) !== 0) {
-        throw new Error(
-          "only $0-balance accounts can be deactivated — move or correct its balance first"
-        );
+      // The $0 guard applies only to balance-sheet accounts — a P&L account's
+      // net is a lifetime total, not money on hand, so it's always archivable.
+      const isBalanceSheet =
+        acct.classification === "asset" ||
+        acct.classification === "liability" ||
+        acct.classification === "equity";
+      if (isBalanceSheet) {
+        const [{ net }] = await tx
+          .select({
+            net: sql<string>`COALESCE(SUM(${schema.bkJournalLines.debitCents} - ${schema.bkJournalLines.creditCents}), 0)`,
+          })
+          .from(schema.bkJournalLines)
+          .where(eq(schema.bkJournalLines.accountId, acct.id));
+        if (Number(net) !== 0) {
+          throw new Error(
+            "only $0-balance accounts can be deactivated — move or correct its balance first"
+          );
+        }
       }
       const [activeChild] = await tx
         .select({ id: bkAccounts.id })

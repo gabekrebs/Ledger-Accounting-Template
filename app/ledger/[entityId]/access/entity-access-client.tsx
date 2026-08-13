@@ -12,6 +12,7 @@ import {
   grantEntityAction,
   revokeEntityAction,
 } from "../../users/actions";
+import type { EntityAccessLevel } from "@/lib/ledger/users";
 
 type Grant = { email: string; displayName: string | null; active: boolean };
 
@@ -33,21 +34,30 @@ export function EntityAccessClient({
   const [adding, setAdding] = useState(false);
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
+  const [level, setLevel] = useState<EntityAccessLevel>("read");
   const [pending, startTransition] = useTransition();
 
   function grantExisting(grantEmail: string) {
     startTransition(async () => {
-      const res = await grantEntityAction(grantEmail, entityId);
-      if (!res.ok) toast.error(res.error ?? "Could not grant access.");
-      else toast.success(`${grantEmail} granted`);
+      try {
+        const res = await grantEntityAction(grantEmail, entityId, level);
+        if (!res.ok) toast.error(res.error ?? "Could not grant access.");
+        else toast.success(`${grantEmail} granted ${level === "write" ? "read/write" : "read-only"}`);
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "Could not grant access.");
+      }
     });
   }
 
   function revoke(revokeEmail: string) {
     startTransition(async () => {
-      const res = await revokeEntityAction(revokeEmail, entityId);
-      if (!res.ok) toast.error(res.error ?? "Could not revoke access.");
-      else toast.success(`${revokeEmail} removed from this entity`);
+      try {
+        const res = await revokeEntityAction(revokeEmail, entityId);
+        if (!res.ok) toast.error(res.error ?? "Could not revoke access.");
+        else toast.success(`${revokeEmail} removed from this entity`);
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "Could not revoke access.");
+      }
     });
   }
 
@@ -57,29 +67,35 @@ export function EntityAccessClient({
       return;
     }
     startTransition(async () => {
-      const res = await createUserAction({
-        email: email.trim(),
-        displayName: name,
-        role: "member",
-        entityIds: [entityId],
-        fromEntityId: entityId,
-      });
-      if (!res.ok) {
-        toast.error(res.error ?? "Could not add the user.");
-        return;
-      }
-      if (res.tempPassword) {
-        setCredential({
-          email: email.trim().toLowerCase(),
-          password: res.tempPassword,
+      try {
+        const res = await createUserAction({
+          email: email.trim(),
+          displayName: name,
+          role: "business_partner",
+          entityGrants: [{ entityId, accessLevel: level }],
+          fromEntityId: entityId,
         });
-      } else if (res.reusedExistingLogin) {
-        toast.success("Added — they already had a login, so their existing password works.");
+        if (!res.ok) {
+          toast.error(res.error ?? "Could not add the user.");
+          return;
+        }
+        if (res.tempPassword) {
+          setCredential({
+            email: email.trim().toLowerCase(),
+            password: res.tempPassword,
+          });
+        } else if (res.reusedExistingLogin) {
+          toast.success("Added — they already had a login, so their existing password works.");
+        }
+        toast.success(`${email.trim().toLowerCase()} can now see this entity`);
+        setEmail("");
+        setName("");
+        setAdding(false);
+      } catch (e) {
+        toast.error(
+          e instanceof Error ? e.message : "Something went wrong — refresh and check."
+        );
       }
-      toast.success(`${email.trim().toLowerCase()} can now see this entity`);
-      setEmail("");
-      setName("");
-      setAdding(false);
     });
   }
 
@@ -102,12 +118,12 @@ export function EntityAccessClient({
       </div>
 
       {credential && (
-        <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm">
-          <div className="font-medium text-amber-900">
+        <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm dark:border-amber-400/30 dark:bg-amber-400/10">
+          <div className="font-medium text-amber-900 dark:text-amber-200">
             Temporary password for {credential.email}
           </div>
           <div className="mt-1 flex items-center gap-3">
-            <code className="rounded bg-white px-2 py-1 font-mono text-amber-900 ring-1 ring-amber-200">
+            <code className="rounded bg-white px-2 py-1 font-mono text-amber-900 ring-1 ring-amber-200 dark:bg-black/40 dark:text-amber-200 dark:ring-amber-400/30">
               {credential.password}
             </code>
             <Button
@@ -124,7 +140,7 @@ export function EntityAccessClient({
               Dismiss
             </Button>
           </div>
-          <p className="mt-1.5 text-xs text-amber-800">
+          <p className="mt-1.5 text-xs text-amber-800 dark:text-amber-200/80">
             Shown once — share it securely.
           </p>
         </div>
@@ -132,6 +148,29 @@ export function EntityAccessClient({
 
       {adding && (
         <div className="space-y-4 rounded-lg border border-hair p-4">
+          <div className="space-y-2">
+            <Label>Access level</Label>
+            <div className="flex gap-2">
+              {(["read", "write"] as EntityAccessLevel[]).map((lv) => (
+                <button
+                  key={lv}
+                  type="button"
+                  onClick={() => setLevel(lv)}
+                  className={`rounded-md border px-3 py-1.5 text-sm transition-colors ${
+                    level === lv
+                      ? "border-foreground bg-foreground text-background"
+                      : "border-hair hover:bg-paper"
+                  }`}
+                >
+                  {lv === "write" ? "Read & write" : "Read-only"}
+                </button>
+              ))}
+            </div>
+            <p className="text-xs text-faint">
+              Applies to whoever you add below. Read/write changes are logged for
+              your review.
+            </p>
+          </div>
           {grantable.length > 0 && (
             <div className="space-y-2">
               <Label>Existing users</Label>

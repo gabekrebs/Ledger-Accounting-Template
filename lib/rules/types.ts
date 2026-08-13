@@ -98,10 +98,13 @@ export const FIELD_REGISTRY: readonly FieldDef[] = [
   { id: "isoCurrencyCode", label: "Currency", kind: "string", get: (f) => f.isoCurrencyCode },
   { id: "dayOfMonth", label: "Day of month", kind: "number", get: (f) => f.dayOfMonth },
   { id: "weekday", label: "Weekday (0=Sun)", kind: "number", get: (f) => f.weekday },
+  // Which bank account the txn hit (Plaid mask / last four). Lets an entity
+  // route the SAME vendor to different accounts per property (e.g. rent from
+  // one payer split across two properties' bank accounts).
+  { id: "accountLast4", label: "Account ··last4", kind: "string", get: (f) => f.accountLast4 },
   // reserved
   { id: "memo", label: "Memo", kind: "string", reserved: true, get: (f) => f.memo },
   { id: "checkNumber", label: "Check #", kind: "string", reserved: true, get: (f) => f.checkNumber },
-  { id: "accountLast4", label: "Account ··last4", kind: "string", reserved: true, get: (f) => f.accountLast4 },
   { id: "location", label: "Property / location", kind: "string", reserved: true, get: (f) => f.location },
   { id: "entity", label: "Entity", kind: "string", reserved: true, get: (f) => f.entity },
   { id: "txnType", label: "Transaction type", kind: "string", reserved: true, get: (f) => f.txnType },

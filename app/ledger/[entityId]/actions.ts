@@ -1,11 +1,9 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { eq } from "drizzle-orm";
-import { assertEntityAccess } from "@/lib/ledger/access";
+import { assertEntityAccess, assertEntityWrite } from "@/lib/ledger/access";
+import { logAudit } from "@/lib/ledger/audit";
 import { getCurrentUser } from "@/lib/supabase/auth-server";
-import { db } from "@/lib/db/client";
-import { bkLedgerEntities } from "@/lib/db/schema";
 import {
   getEditableTransaction,
   editTransaction,
@@ -57,12 +55,26 @@ export async function saveTransactionEdit(input: {
   txnDate?: string;
   lines?: LineEdit[];
 }): Promise<{ ok: boolean; changed?: number; error?: string }> {
-  await assertEntityAccess(input.entityId);
+  await assertEntityWrite(input.entityId);
   const user = await getCurrentUser();
   try {
     const { changed } = await editTransaction({
       ...input,
       editedBy: user?.email ?? null,
+    });
+    await logAudit({
+      entityId: input.entityId,
+      actionType: "edit_transaction",
+      objectTable: "bk_journal_entries",
+      objectId: input.entryId,
+      description: `Edited a transaction (${changed} line(s)/field(s) changed)`,
+      after: {
+        name: input.name ?? undefined,
+        memo: input.memo ?? undefined,
+        txnDate: input.txnDate,
+        lineEdits: input.lines?.length ?? 0,
+      },
+      affectedLedger: true,
     });
     revalidateEntity(input.entityId);
     return { ok: true, changed };
@@ -76,9 +88,19 @@ export async function revertTransactionEdit(input: {
   entityId: string;
   entryId: string;
 }): Promise<{ ok: boolean; reverted?: boolean; error?: string }> {
-  await assertEntityAccess(input.entityId);
+  await assertEntityWrite(input.entityId);
   try {
     const { reverted } = await revertTransaction(input.entityId, input.entryId);
+    if (reverted) {
+      await logAudit({
+        entityId: input.entityId,
+        actionType: "revert_transaction_edit",
+        objectTable: "bk_journal_entries",
+        objectId: input.entryId,
+        description: "Reverted a transaction to its pre-edit state",
+        affectedLedger: true,
+      });
+    }
     revalidateEntity(input.entityId);
     return { ok: true, reverted };
   } catch (e) {
@@ -96,20 +118,3 @@ function revalidateEntity(entityId: string) {
   revalidatePath(`${base}/gl/[accountId]`, "page");
 }
 
-/**
- * Set (or clear) an entity's formation date. Drives the capital "initial vs
- * capital call" split: contributions in the formation fiscal year are initial,
- * later ones are capital calls. Clearing it falls back to the earliest journal
- * txn. Per-entity, UI-editable — no hardcoded dates anywhere (multi-tenant).
- */
-export async function setFormationDate(formData: FormData) {
-  const entityId = String(formData.get("entityId"));
-  await assertEntityAccess(entityId);
-  const raw = String(formData.get("formationDate") ?? "").trim();
-  const formationDate = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : null;
-  await db
-    .update(bkLedgerEntities)
-    .set({ formationDate })
-    .where(eq(bkLedgerEntities.id, entityId));
-  revalidatePath(`/ledger/${entityId}`);
-}

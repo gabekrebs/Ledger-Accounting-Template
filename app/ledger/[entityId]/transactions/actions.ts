@@ -2,7 +2,8 @@
 
 import { revalidatePath } from "next/cache";
 import { and, asc, eq, isNotNull } from "drizzle-orm";
-import { assertEntityAccess } from "@/lib/ledger/access";
+import { assertEntityAccess, assertEntityWrite } from "@/lib/ledger/access";
+import { logAudit } from "@/lib/ledger/audit";
 import { getCurrentUser } from "@/lib/supabase/auth-server";
 import { db, schema } from "@/lib/db/client";
 
@@ -63,12 +64,20 @@ export async function createManualEntryAction(input: {
   docNum?: string | null;
   lines: ManualLineInput[];
 }): Promise<{ ok: boolean; entryId?: string; error?: string }> {
-  await assertEntityAccess(input.entityId);
+  await assertEntityWrite(input.entityId);
   const user = await getCurrentUser();
   try {
     const { entryId } = await createManualEntry({
       ...input,
       createdBy: user?.email ?? null,
+    });
+    await logAudit({
+      entityId: input.entityId,
+      actionType: "create_manual_entry",
+      objectTable: "bk_journal_entries",
+      objectId: entryId,
+      description: `Created a manual journal entry dated ${input.txnDate}${input.name ? ` (${input.name})` : ""}`,
+      affectedLedger: true,
     });
     revalidateEntity(input.entityId);
     return { ok: true, entryId };
@@ -81,9 +90,17 @@ export async function deleteManualEntryAction(input: {
   entityId: string;
   entryId: string;
 }): Promise<{ ok: boolean; error?: string }> {
-  await assertEntityAccess(input.entityId);
+  await assertEntityWrite(input.entityId);
   try {
     await deleteManualEntry(input.entityId, input.entryId);
+    await logAudit({
+      entityId: input.entityId,
+      actionType: "delete_manual_entry",
+      objectTable: "bk_journal_entries",
+      objectId: input.entryId,
+      description: "Deleted a manual journal entry",
+      affectedLedger: true,
+    });
     revalidateEntity(input.entityId);
     return { ok: true };
   } catch (e) {

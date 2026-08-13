@@ -35,10 +35,13 @@ const { bkPlaidTransactions } = schema;
 export async function buildFactsContext(entityId: string): Promise<FactsContext> {
   const items = await listItems(entityId);
   const subtypeByPlaidAcct = new Map<string, string | null>();
+  const last4ByPlaidAcct = new Map<string, string | null>();
   for (const it of items)
-    for (const a of it.accounts)
+    for (const a of it.accounts) {
       subtypeByPlaidAcct.set(a.plaidAccountId, a.subtype ?? null);
-  return { subtypeByPlaidAcct };
+      last4ByPlaidAcct.set(a.plaidAccountId, a.mask ?? null);
+    }
+  return { subtypeByPlaidAcct, last4ByPlaidAcct };
 }
 
 export interface ApplyResult {

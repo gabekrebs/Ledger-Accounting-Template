@@ -12,6 +12,7 @@ import { Money } from "@/components/money";
 import { cn } from "@/lib/utils";
 import type { TxnSearchRow } from "@/lib/ledger/reports";
 import { EditTransactionButton } from "../edit-transaction";
+import { fmtDate } from "@/lib/ledger/format";
 
 type SortKey = "date" | "type" | "name" | "amount";
 type SortDir = "asc" | "desc";
@@ -37,28 +38,40 @@ const TYPE_LABEL: Record<string, string> = {
   RefundReceipt: "Refund",
   VendorCredit: "Vendor Credit",
 };
-const OTHER = "Other";
-
-function prettyType(t: string | null): string {
-  if (!t) return OTHER;
+function prettyType(t: string): string {
   if (TYPE_LABEL[t]) return TYPE_LABEL[t];
-  // Fallback: split CamelCase into words ("CreditMemo" → "Credit Memo").
+  // Fallback: split CamelCase into words ("TaxReturn" → "Tax Return").
   return t.replace(/([a-z])([A-Z])/g, "$1 $2");
 }
 
 /**
- * Wave-imported entries are all stored under the synthetic type "WaveTxn" —
- * the stored value can't change (it's part of the import idempotency key), so
- * derive a human label from the entry's shape instead.
+ * Display type derived from the posting shape. Used whenever the stored type
+ * carries no meaning: Wave imports (all "WaveTxn" — part of the import
+ * idempotency key, so it can't be rewritten) and bank-feed / partner-mirror
+ * entries (no type at all). QBO-imported entries never come here — their
+ * stored type is more specific than any shape guess.
  */
-function waveTypeLabel(r: TxnSearchRow): string {
-  // Year-end bookkeeping JEs are named "To adj… / To group… / To reclassify…".
+function typeFromShape(r: TxnSearchRow): string {
+  // Wave year-end bookkeeping JEs are named "To adj… / To group… / To reclassify…".
   if (r.name && /^to (adj|group|reclass|remove|record|zero)/i.test(r.name.trim()))
     return "Journal Entry";
   // Wave models bank↔bank moves as paired entries through a clearing account.
   if (r.lines.some((l) => /transfer clearing/i.test(l.accountName))) return "Transfer";
   const bank = r.lines.filter((l) => l.accountType === "Bank");
-  if (bank.length === 0) return "Journal Entry";
+  if (bank.length === 0) {
+    // Card-feed entities have no bank line — the card itself is the cash
+    // side. Liability up = spend on the card; down = a statement credit.
+    const ccNet = r.lines
+      .filter((l) => l.accountType === "Credit Card")
+      .reduce((s, l) => s + l.creditCents - l.debitCents, 0);
+    if (ccNet > 0) return "Card Charge";
+    if (ccNet < 0) return "Card Credit";
+    // No cash moved, but it's mortgage bookkeeping (the monthly
+    // principal/interest split corrections, statement ties, balloon
+    // reclasses) — the ledger is full of these and "Journal Entry" hides them.
+    if (r.lines.some((l) => MORTGAGE.test(l.accountName))) return "Mortgage";
+    return "Journal Entry";
+  }
   if (
     bank.length >= 2 &&
     bank.some((l) => l.debitCents > 0) &&
@@ -68,40 +81,90 @@ function waveTypeLabel(r: TxnSearchRow): string {
   const bankNet = bank.reduce((s, l) => s + l.debitCents - l.creditCents, 0);
   const others = r.lines.filter((l) => l.accountType !== "Bank");
   if (bankNet < 0) {
-    if (others.some((l) => l.accountType === "Long Term Liability" && l.debitCents > 0))
-      return "Loan Payment";
+    const loan = others.filter(
+      (l) => l.accountType === "Long Term Liability" && l.debitCents > 0
+    );
+    if (loan.length > 0)
+      return loan.some((l) => MORTGAGE.test(l.accountName))
+        ? "Mortgage"
+        : "Loan Payment";
     if (others.some((l) => l.accountType === "Credit Card" && l.debitCents > 0))
-      return "Credit Card Payment";
+      return "Card Payment";
     if (others.some((l) => l.accountType === "Equity" && l.debitCents > 0))
       return "Owner Draw";
     return "Expense";
   }
   if (others.some((l) => l.accountType === "Equity" && l.creditCents > 0))
     return "Owner Contribution";
+  // Money in that reverses an expense (and books no income) is a refund,
+  // not revenue — vendor credits, duplicate reversals, permit refunds.
+  if (
+    others.some((l) => EXPENSE_TYPE.test(l.accountType) && l.creditCents > 0) &&
+    !others.some((l) => INCOME_TYPE.test(l.accountType) && l.creditCents > 0)
+  )
+    return "Refund";
   return "Deposit";
 }
 
-/** Display type for a row — shape-derived for Wave imports, mapped otherwise. */
-function rowType(r: TxnSearchRow): string {
-  return r.qboTxnType === "WaveTxn" ? waveTypeLabel(r) : prettyType(r.qboTxnType);
+const MORTGAGE = /mortgage/i;
+/** QBO account types that mean expense / income on a posting line. */
+const EXPENSE_TYPE = /^(Expense|Other Expense|Cost of Goods Sold)$/;
+const INCOME_TYPE = /^(Income|Other Income)$/;
+
+/** A stored type worth showing — anything real except Wave's synthetic marker. */
+function storedType(r: TxnSearchRow): string | null {
+  return r.qboTxnType && r.qboTxnType !== "WaveTxn" ? r.qboTxnType : null;
 }
 
-/** Cash direction for the shape-derived Wave labels. */
-const WAVE_DIR: Record<string, "in" | "out"> = {
-  Deposit: "in",
-  "Owner Contribution": "in",
-  Expense: "out",
-  "Loan Payment": "out",
-  "Credit Card Payment": "out",
-  "Owner Draw": "out",
-};
+function rowType(r: TxnSearchRow): string {
+  const t = storedType(r);
+  if (t === "ManualEntry") {
+    // In-product manual JEs: say what the entry does when the shape knows
+    // (mortgage splits, owner draws…); keep the provenance label only when
+    // the shape has nothing better than the vague fallback.
+    const shaped = typeFromShape(r);
+    return shaped === "Journal Entry" ? "Manual Entry" : shaped;
+  }
+  return t ? prettyType(t) : typeFromShape(r);
+}
+
+/**
+ * A transaction's amounts as plain decimal strings ("671.94") — the entry total
+ * plus each line's non-zero side — so the search box can find an entry by its
+ * dollar amount (matched by prefix, so "671", "671.94" and "$2,400.00" all work).
+ */
+function amountStrings(r: TxnSearchRow): string[] {
+  const out = [(r.totalCents / 100).toFixed(2)];
+  for (const l of r.lines) {
+    if (l.debitCents > 0) out.push((l.debitCents / 100).toFixed(2));
+    if (l.creditCents > 0) out.push((l.creditCents / 100).toFixed(2));
+  }
+  return out;
+}
+
+/**
+ * Cash direction read straight off the posting: which way did money move
+ * through the bank (or, for card feeds, the card)? Label-independent, so a
+ * mortgage *payment* shows red while a no-cash mortgage split stays neutral.
+ */
+function shapeDirection(r: TxnSearchRow): "in" | "out" | null {
+  const bankNet = r.lines
+    .filter((l) => l.accountType === "Bank")
+    .reduce((s, l) => s + l.debitCents - l.creditCents, 0);
+  if (bankNet !== 0) return bankNet > 0 ? "in" : "out";
+  const ccNet = r.lines
+    .filter((l) => l.accountType === "Credit Card")
+    .reduce((s, l) => s + l.creditCents - l.debitCents, 0);
+  if (ccNet !== 0) return ccNet > 0 ? "out" : "in";
+  return null;
+}
 function rowDirection(r: TxnSearchRow): "in" | "out" | null {
-  if (r.qboTxnType === "WaveTxn") return WAVE_DIR[waveTypeLabel(r)] ?? null;
-  return direction(r.qboTxnType);
+  const t = storedType(r);
+  return t && t !== "ManualEntry" ? direction(t) : shapeDirection(r);
 }
 
 /** Cash direction inferred from the QBO type — only where it's unambiguous. */
-function direction(t: string | null): "in" | "out" | null {
+function direction(t: string): "in" | "out" | null {
   switch (t) {
     case "Deposit":
     case "SalesReceipt":
@@ -122,14 +185,6 @@ function direction(t: string | null): "in" | "out" | null {
   }
 }
 
-/** "2026-04-22" → "Apr 22, 2026" without tripping over timezones. */
-const MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split(" ");
-function fmtDate(iso: string): string {
-  const [y, m, d] = iso.slice(0, 10).split("-");
-  const mi = Number(m) - 1;
-  if (!y || mi < 0 || mi > 11) return iso;
-  return `${MONTHS[mi]} ${Number(d)}, ${y}`;
-}
 
 /** Shift an ISO date by N days (UTC, so no DST drift). */
 function shiftDays(iso: string, days: number): string {
@@ -235,7 +290,15 @@ export function TransactionsTable({
         const hay = `${r.name ?? ""} ${r.memo ?? ""} ${r.docNum ?? ""} ${rowType(
           r
         )} ${r.lines.map((l) => l.accountName).join(" ")}`.toLowerCase();
-        if (!hay.includes(q)) return false;
+        if (!hay.includes(q)) {
+          // Also try a dollar-amount match: strip $ , and spaces; if the query is
+          // numeric, match the entry total or any line amount by decimal prefix.
+          const amt = q.replace(/[$,\s]/g, "");
+          const numeric = amt.length > 0 && /^\d*\.?\d*$/.test(amt) && /\d/.test(amt);
+          if (!numeric || !amountStrings(r).some((s) => s.startsWith(amt))) {
+            return false;
+          }
+        }
       }
       return true;
     });
@@ -325,7 +388,7 @@ export function TransactionsTable({
               ref={searchRef}
               value={rawQuery}
               onChange={(e) => changeQuery(e.target.value)}
-              placeholder="Search name, memo, doc #, account…"
+              placeholder="Search name, memo, amount, account…"
               className="h-8 w-72 rounded-lg border border-hair bg-transparent pl-8 pr-7 text-sm outline-none placeholder:text-faint focus-visible:border-evergreen focus-visible:ring-2 focus-visible:ring-evergreen/20"
             />
             <SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-faint" />

@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono, Source_Serif_4 } from "next/font/google";
 import { Toaster } from "@/components/ui/sonner";
 import { AuthHeader } from "./auth-header";
+import { ThemeProvider } from "./theme-provider";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -24,7 +25,7 @@ export const metadata: Metadata = {
   title: "Ledger Accounting Template",
   description: "Multi-entity bookkeeping and ledger",
   applicationName: "Ledger Accounting Template",
-  metadataBase: new URL("https://your-app.example.com"),
+  metadataBase: new URL(process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000"),
 };
 
 export default function RootLayout({
@@ -36,11 +37,15 @@ export default function RootLayout({
     <html
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} ${sourceSerif.variable} h-full antialiased`}
+      // next-themes stamps the theme class on <html> before hydration.
+      suppressHydrationWarning
     >
       <body className="min-h-full flex flex-col bg-background text-foreground">
-        <AuthHeader />
-        {children}
-        <Toaster richColors expand position="top-right" />
+        <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
+          <AuthHeader />
+          {children}
+          <Toaster richColors expand position="top-right" />
+        </ThemeProvider>
       </body>
     </html>
   );

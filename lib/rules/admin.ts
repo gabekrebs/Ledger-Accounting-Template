@@ -11,14 +11,10 @@ import {
   applyRuleToTxn,
   applyToSimilar,
   applyRetroactively,
-  buildFactsContext,
 } from "@/lib/rules/apply";
-import { extractFacts } from "@/lib/rules/facts";
-import { matches } from "@/lib/rules/predicates";
 import { newCanonCache } from "@/lib/rules/actions";
 import { assertRuleAppliesToEntity, assertTxnInEntity } from "@/lib/rules/authz";
-import { listPendingTransactions } from "@/lib/plaid/data";
-import type { ActionSpec, ConditionGroup } from "@/lib/rules/types";
+import type { ActionSpec } from "@/lib/rules/types";
 
 export interface RulePayload {
   ruleId?: string;
@@ -111,19 +107,4 @@ export async function applyRuleRetroactive(ruleId: string, entityId: string, act
   if (!rule) throw new Error("rule not found");
   assertRuleAppliesToEntity(rule, entityId); // no foreign entity rule on this entity
   return applyRetroactively(entityId, rule, newCanonCache(), actor);
-}
-
-/** Count still-pending matches for a saved rule (used by list "apply" affordances). */
-export async function countPendingMatches(ruleId: string, entityId: string): Promise<number> {
-  const rule = await getRule(ruleId);
-  if (!rule) return 0;
-  const [pending, ctx] = await Promise.all([
-    listPendingTransactions(entityId),
-    buildFactsContext(entityId),
-  ]);
-  let n = 0;
-  for (const t of pending) {
-    if (matches(rule.predicate as ConditionGroup, extractFacts(t, ctx))) n++;
-  }
-  return n;
 }

@@ -1,0 +1,13 @@
+{
+  "entry": [
+    "app/**/{page,layout,route,loading,error,not-found,template,forbidden}.{ts,tsx}",
+    "app/globals.css",
+    "proxy.ts",
+    "next.config.ts",
+    "postcss.config.mjs",
+    "eslint.config.mjs",
+    "scripts/**/*.{mjs,mts}",
+    "drizzle.config.ts"
+  ],
+  "project": ["app/**", "lib/**", "components/**", "scripts/**"]
+}

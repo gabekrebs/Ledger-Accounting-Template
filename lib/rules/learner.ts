@@ -11,10 +11,13 @@
  *
  * This is the replacement for the fingerprint's auto-post: "zero-touch silent
  * posting" becomes "one-click approve, then deterministic". Idempotent — a
- * merchant already covered by an active OR proposed rule is skipped, so re-runs
- * don't pile up duplicates.
+ * merchant already covered by an active, proposed, OR dismissed (archived) rule
+ * is skipped, so re-runs don't pile up duplicates and a dismissal sticks. A
+ * dismissed merchant can re-earn a proposal only from transactions dated AFTER
+ * the dismissal (the owner's rule: old data never resurfaces; a vendor that
+ * genuinely returns may).
  */
-import { and, eq, inArray, or } from "drizzle-orm";
+import { and, eq, gt, inArray, or } from "drizzle-orm";
 import { db, schema } from "@/lib/db/client";
 import {
   buildMerchantHistory,
@@ -33,7 +36,7 @@ import { matches } from "@/lib/rules/predicates";
 import { proposeLearnedRule } from "@/lib/rules/store";
 import type { ConditionGroup, TxnFacts } from "@/lib/rules/types";
 
-const { bkRules, bkAccounts } = schema;
+const { bkRules, bkAccounts, bkPlaidTransactions } = schema;
 
 export type CandidateSource = "local" | "portfolio";
 export interface Candidate {
@@ -117,32 +120,63 @@ export async function fingerprintCandidates(
   return raw.filter((c) => active.has(c.accountId));
 }
 
-/** Active rules + every proposed rule visible to the entity — the coverage sets. */
-export async function coverageSets(entityId: string): Promise<{ active: RuleRow[]; proposed: RuleRow[] }> {
-  const [active, proposed] = await Promise.all([
+/**
+ * Active rules + every proposed AND archived rule visible to the entity — the
+ * coverage sets. Archived rules count as coverage on purpose: dismissing a
+ * proposal (or archiving a rule) is the owner saying "stop suggesting this
+ * merchant" — old vendors, one-offs — and without them in the set every author
+ * would re-propose the same merchant on the next sweep.
+ */
+export async function coverageSets(
+  entityId: string
+): Promise<{ active: RuleRow[]; proposed: RuleRow[]; dismissed: RuleRow[] }> {
+  const [active, rows] = await Promise.all([
     loadRules(entityId),
     db
       .select()
       .from(bkRules)
       .where(
         and(
-          eq(bkRules.status, "proposed"),
+          or(eq(bkRules.status, "proposed"), eq(bkRules.status, "archived")),
           or(eq(bkRules.scope, "global"), eq(bkRules.entityId, entityId))
         )
       ),
   ]);
-  return { active, proposed };
+  return {
+    active,
+    proposed: rows.filter((r) => r.status === "proposed"),
+    dismissed: rows.filter((r) => r.status === "archived"),
+  };
 }
 
-/** Is this merchant already covered by an active or proposed rule? */
+/** Is this merchant already covered by an active, proposed, or dismissed rule? */
 export function coverageFor(
   merchant: string,
-  sets: { active: RuleRow[]; proposed: RuleRow[] }
-): "active" | "proposed" | "uncovered" {
+  sets: { active: RuleRow[]; proposed: RuleRow[]; dismissed: RuleRow[] }
+): "active" | "proposed" | "dismissed" | "uncovered" {
   const facts = synthFacts(merchant);
   if (selectRule(sets.active, facts)) return "active";
   if (sets.proposed.some((r) => matches(r.predicate as ConditionGroup, facts))) return "proposed";
+  if (sets.dismissed.some((r) => matches(r.predicate as ConditionGroup, facts))) return "dismissed";
   return "uncovered";
+}
+
+/**
+ * When was this merchant most recently dismissed? (The archived rule's
+ * updatedAt — the moment of the status flip.) A dismissal is not forever: it
+ * suppresses every transaction up to that moment, and the merchant earns its
+ * way back only with NEW activity dated after it (owner: "if I dismiss, I
+ * don't want to hear about it again — unless a new transaction posts").
+ */
+export function latestDismissalAt(merchant: string, dismissed: RuleRow[]): Date | null {
+  const facts = synthFacts(merchant);
+  let at: Date | null = null;
+  for (const r of dismissed) {
+    if (!matches(r.predicate as ConditionGroup, facts)) continue;
+    const t = r.updatedAt ?? r.createdAt;
+    if (t && (!at || t > at)) at = t;
+  }
+  return at;
 }
 
 export interface LearnerResult {
@@ -181,22 +215,13 @@ export async function proposeRulesFromHistory(
   let activeCovered = 0;
   const details: LearnerResult["details"] = [];
 
-  for (const c of candidates) {
-    const cov = coverageFor(c.merchant, sets);
-    if (cov !== "uncovered") {
-      if (cov === "active") activeCovered++;
-      skipped++;
-      continue;
-    }
+  const propose = async (c: Candidate, description: string) => {
     const acctLabel = acctNames.get(c.accountId) || "category";
     await proposeLearnedRule({
       scope: "entity",
       entityId,
       name: `${c.source === "portfolio" ? "Cross-ledger" : "History"}: ${c.merchant} → ${acctLabel}`,
-      description:
-        c.source === "portfolio"
-          ? `Proposed from ${c.samples} cross-ledger postings (no local history yet).`
-          : `Proposed from ${c.samples} unanimous prior postings.`,
+      description,
       predicate: { all: [{ field: "merchant", op: "eq", value: c.merchant }] },
       action: { kind: "categorize", target: { by: "account", accountId: c.accountId } },
     });
@@ -206,6 +231,75 @@ export async function proposeRulesFromHistory(
     sets.proposed.push({
       predicate: { all: [{ field: "merchant", op: "eq", value: c.merchant }] },
     } as RuleRow);
+  };
+
+  const dismissedCands: { c: Candidate; at: Date }[] = [];
+  for (const c of candidates) {
+    const cov = coverageFor(c.merchant, sets);
+    if (cov === "active") {
+      activeCovered++;
+      skipped++;
+      continue;
+    }
+    if (cov === "proposed") {
+      skipped++;
+      continue;
+    }
+    if (cov === "dismissed") {
+      const at = latestDismissalAt(c.merchant, sets.dismissed);
+      if (at) {
+        dismissedCands.push({ c, at });
+        continue;
+      }
+    }
+    await propose(
+      c,
+      c.source === "portfolio"
+        ? `Proposed from ${c.samples} cross-ledger postings (no local history yet).`
+        : `Proposed from ${c.samples} unanimous prior postings.`
+    );
+  }
+
+  // A dismissed merchant re-earns a proposal only from scratch: its lifetime
+  // samples got it here, but it must show AUTOPOST_MIN_SAMPLES transactions
+  // DATED AFTER the dismissal — same evidence bar as a brand-new vendor. Dead
+  // vendors stay silent forever; a vendor that genuinely returns resurfaces.
+  if (dismissedCands.length) {
+    const floor = new Date(Math.min(...dismissedCands.map((d) => d.at.getTime())))
+      .toISOString()
+      .slice(0, 10);
+    const txns = await db
+      .select({
+        name: bkPlaidTransactions.name,
+        merchantName: bkPlaidTransactions.merchantName,
+        amountCents: bkPlaidTransactions.amountCents,
+        isoCurrencyCode: bkPlaidTransactions.isoCurrencyCode,
+        plaidCategory: bkPlaidTransactions.plaidCategory,
+        txnDate: bkPlaidTransactions.txnDate,
+        plaidAccountId: bkPlaidTransactions.plaidAccountId,
+      })
+      .from(bkPlaidTransactions)
+      .where(and(eq(bkPlaidTransactions.entityId, entityId), gt(bkPlaidTransactions.txnDate, floor)));
+    const datesByKey = new Map<string, string[]>();
+    for (const t of txns) {
+      const key = extractFacts({ ...t, txnDate: String(t.txnDate) }, {}).merchant;
+      if (key.length < 3) continue;
+      const list = datesByKey.get(key) ?? [];
+      list.push(String(t.txnDate));
+      datesByKey.set(key, list);
+    }
+    for (const { c, at } of dismissedCands) {
+      const atYmd = at.toISOString().slice(0, 10);
+      const fresh = (datesByKey.get(c.merchant) ?? []).filter((d) => d > atYmd).length;
+      if (fresh < AUTOPOST_MIN_SAMPLES) {
+        skipped++;
+        continue;
+      }
+      await propose(
+        c,
+        `Vendor active again — ${fresh} new postings since you dismissed it (${c.samples} lifetime).`
+      );
+    }
   }
 
   return { proposed, skipped, total: candidates.length, activeCovered, details };

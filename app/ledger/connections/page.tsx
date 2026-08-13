@@ -7,7 +7,7 @@ import { ReplaceButton } from "./replace-button";
 import { SuggestMatches } from "./suggest-matches";
 import { assignAccount } from "./actions";
 import { listConnections, listAssignTargets } from "@/lib/plaid/data";
-import { assertAdmin } from "@/lib/ledger/access";
+import { assertOwner } from "@/lib/ledger/access";
 import { Button } from "@/components/ui/button";
 
 export const dynamic = "force-dynamic";
@@ -27,7 +27,7 @@ function fmtSynced(d: Date | null): string {
 }
 
 export default async function ConnectionsPage() {
-  await assertAdmin(); // bank-connection management surfaces all entities — admin only
+  await assertOwner(); // bank-connection management is a system surface — owner only
   const [connections, targets] = await Promise.all([
     listConnections(),
     listAssignTargets(),
@@ -39,7 +39,7 @@ export default async function ConnectionsPage() {
 
   return (
     <main className="flex-1 px-6 py-12">
-      <div className="mx-auto w-full max-w-4xl space-y-8">
+      <div className="mx-auto w-full max-w-page space-y-8">
         <div className="flex items-start justify-between">
           <div>
             <Link
@@ -63,6 +63,12 @@ export default async function ConnectionsPage() {
             <ConnectBankButton />
           </div>
         </div>
+
+        {hasConnections && (
+          <div className="max-w-2xl">
+            <ConnectBankButton force />
+          </div>
+        )}
 
         {!hasConnections ? (
           <div className="rounded-lg border border-dashed border-hair px-6 py-12 text-center">

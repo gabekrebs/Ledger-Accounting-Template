@@ -92,7 +92,7 @@ export async function assignPlaidAccount(
 
   await restampPendingForAccount(acct.plaidAccountId, entityId);
   // The slow follow-up (reconcile + auto-post) is deliberately NOT run here:
-  // a first sync delivers hundreds of pending transactions, and doing that
+  // a first sync delivers hundreds of staged transactions to review, and doing that
   // work inline made the assignment server action exceed its timeout — the
   // UI's Confirm button hung at "Linking…" forever. Callers run
   // settleAssignedEntity() in after() so the response returns immediately.

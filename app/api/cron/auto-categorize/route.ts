@@ -9,7 +9,10 @@ import {
   ingestCategoryBatches,
   submitCategoryBatch,
 } from "@/lib/plaid/categorize-batch";
+import { enrichUnknownMerchants } from "@/lib/ai/merchant-intel";
+import { recalibrateBuckets } from "@/lib/ai/calibration";
 import { syncAllItems } from "@/lib/plaid/sync";
+import { observeReconPortfolio } from "@/lib/ledger/recon-status";
 import { isAuthorizedCron } from "@/lib/security/machine-auth";
 
 export const runtime = "nodejs";
@@ -21,17 +24,18 @@ export const maxDuration = 300;
 const TRIGGER_THRESHOLD = 1;
 
 /**
- * Threshold-triggered categorization sweep. Every run, regardless of threshold,
- * it INGESTS any finished Batch-API jobs (results land async, across runs). Then,
- * when total pending-review transactions across all entities cross the trigger,
- * it (1) runs the deterministic auto-poster (Phase 1) over every entity —
- * posting unanimous-history matches with no AI and no human — and (2) submits the
- * remaining leftovers to the Batch API for Haiku suggestions (Phase 3b, 50% off),
- * persisting the free history suggestions inline. Suggestions only pre-fill the
- * review dropdowns; a human still posts.
- *
- * Below the threshold the submit/auto-post steps are skipped, so it's cheap to
- * schedule often. Triggered by Vercel Cron (GET + CRON_SECRET).
+ * Threshold-triggered categorization sweep (ADR-021 pipeline order). Every run,
+ * regardless of threshold, it INGESTS any finished Batch-API jobs and
+ * RECALIBRATES the auto-post buckets from the evidence ledger. Then, when total
+ * pending-review transactions cross the trigger, it:
+ *   1. ENRICHES unknown merchants (one cached web lookup each, capped),
+ *   2. runs the auto-poster over every entity — recognizers, auto-apply rules,
+ *      and earned AI buckets,
+ *   3. has the learner propose rules from booked history (human approves),
+ *   4. submits the remaining leftovers to the Batch API for Opus suggestions
+ *      (50% off), persisting the free history suggestions inline.
+ * Suggestions only pre-fill the review UI; posting is a human click or an
+ * earned bucket. Triggered by Vercel Cron (GET + CRON_SECRET).
  */
 export async function GET(request: NextRequest) {
   // Fail-closed: rejects everything when CRON_SECRET is unset/blank.
@@ -54,8 +58,29 @@ export async function GET(request: NextRequest) {
     sync = { error: e instanceof Error ? e.message : String(e) };
   }
 
+  // Tick the Reconciliation settling clocks — an observation per Plaid-linked
+  // entity so "off for N days" stays honest even through an unvisited week.
+  // Timing vs the auto-post below is irrelevant (staged rows are netted out of
+  // the residual either way). Isolated: a Plaid hiccup never blocks posting.
+  let recon: Awaited<ReturnType<typeof observeReconPortfolio>> | { error: string };
+  try {
+    recon = await observeReconPortfolio();
+  } catch (e) {
+    recon = { error: e instanceof Error ? e.message : String(e) };
+  }
+
   // Pick up finished batches (cheap; no-op when none are open).
   const ingest = await ingestCategoryBatches();
+
+  // Recalibrate the auto-post buckets from the evidence ledger — measured
+  // precision + the shadow→unlocked state machine. Cheap; runs every sweep so
+  // yesterday's decisions count before today's auto-post pass.
+  let calibration: Awaited<ReturnType<typeof recalibrateBuckets>> | { error: string };
+  try {
+    calibration = await recalibrateBuckets();
+  } catch (e) {
+    calibration = { error: e instanceof Error ? e.message : String(e) };
+  }
 
   const outstanding = await countPendingPortfolio();
   if (outstanding < TRIGGER_THRESHOLD) {
@@ -64,8 +89,20 @@ export async function GET(request: NextRequest) {
       outstanding,
       threshold: TRIGGER_THRESHOLD,
       sync,
+      recon,
       ingest,
+      calibration,
     });
+  }
+
+  // Merchant intel BEFORE the batch submit, so a first-seen merchant's profile
+  // is in the cache when its transactions reach the model. Isolated — an
+  // enrichment failure never blocks posting.
+  let intel: Awaited<ReturnType<typeof enrichUnknownMerchants>> | { error: string };
+  try {
+    intel = await enrichUnknownMerchants();
+  } catch (e) {
+    intel = { error: e instanceof Error ? e.message : String(e) };
   }
 
   const results = await autoPostPortfolio();
@@ -112,7 +149,10 @@ export async function GET(request: NextRequest) {
     fingerprintOnActiveRules: learnerTotals.onActiveRules,
     remaining: await countPendingPortfolio(),
     sync,
+    recon,
     ingest,
+    calibration,
+    intel,
     submit,
     results,
   });

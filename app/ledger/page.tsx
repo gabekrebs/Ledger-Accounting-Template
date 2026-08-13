@@ -1,6 +1,11 @@
 import Link from "next/link";
-import { listEntities } from "@/lib/ledger/reports";
-import { accessibleEntityIds, isAdmin, isEntityCreator } from "@/lib/ledger/access";
+import {
+  listEntities,
+  ownerPctForFirstName,
+  ownerPctForFirstNameAsOf,
+  ownerProfitShareCents,
+} from "@/lib/ledger/reports";
+import { accessibleEntityIds, getAppUser, isAdmin, isEntityCreator } from "@/lib/ledger/access";
 import { getCurrentUser } from "@/lib/supabase/auth-server";
 import { Button } from "@/components/ui/button";
 import { EntitySearchList } from "./entity-search-list";
@@ -16,6 +21,18 @@ export default async function LedgerHome() {
   const ids = await accessibleEntityIds(user?.email);
   const all = await listEntities();
   const entities = ids === "all" ? all : all.filter((e) => ids.has(e.id));
+
+  // Own-share view: the signed-in user's FIRST NAME (from their account, never
+  // the email or a hardcode) + role. Accountants → portfolio-wide only; admin +
+  // business partners also get their own first-name-matched slice.
+  const me = await getAppUser(user?.email);
+  const role = me?.role ?? (admin ? "owner" : "business_partner");
+  const ownerFirstName = (
+    me?.firstName?.trim() ||
+    me?.displayName?.trim().split(/\s+/)[0] ||
+    ""
+  ).toLowerCase();
+  const canSeeOwnView = role !== "accountant";
 
   // Portfolio RE comparison — per-entity parallel queries (faster than one giant cross-join)
   const { db: _db, schema: _schema } = await import("@/lib/db/client");
@@ -49,18 +66,42 @@ export default async function LedgerHome() {
         plSummary(e.id, { ...periods["365d"], activity: "Real Estate", excludeDepreciation: true }),
         plSummary(e.id, { ...periods.lastYear, activity: "Real Estate", excludeDepreciation: true }),
       ]);
-      // The "Owner" pro-rata view keys off a partner whose name contains
-      // OWNER_NAME (set it in your environment). Unset → ownerPct null → the
-      // view shows a dash and the Portfolio view is unaffected.
       const owners = ownersByEntity.get(e.id) ?? [];
-      const ownerName = (process.env.OWNER_NAME ?? "").trim().toLowerCase();
-      const ownerRow = ownerName
-        ? owners?.find((o: { name: string; pct: number }) => o.name.toLowerCase().includes(ownerName))
-        : null;
+      // Owner-share profit per period, time-weighted across dated ownership
+      // changes (roster `prior` entries) — a period spanning a buyout earns
+      // each era its own pct.
+      const share = (p: { start: string; end: string }, noDepr: boolean, total: number) =>
+        ownerProfitShareCents(
+          e.id, owners, ownerFirstName, "legal",
+          { ...p, activity: "Real Estate", excludeDepreciation: noDepr || undefined },
+          total
+        );
+      const [o30, o365, oLY, o30nd, o365nd, oLYnd] = await Promise.all([
+        share(periods["30d"], false, p30.netProfitCents),
+        share(periods["365d"], false, p365.netProfitCents),
+        share(periods.lastYear, false, pLY.netProfitCents),
+        share(periods["30d"], true, p30nd.netProfitCents),
+        share(periods["365d"], true, p365nd.netProfitCents),
+        share(periods.lastYear, true, pLYnd.netProfitCents),
+      ]);
       return {
         entityId: e.id,
         name: e.name,
-        ownerPct: ownerRow?.pct ?? null,
+        ownPct: ownerPctForFirstName(owners, ownerFirstName),
+        ownProfit:
+          o30 == null
+            ? null
+            : {
+                "30d": o30, "365d": o365!, lastYear: oLY!,
+                "30d_noDepr": o30nd!, "365d_noDepr": o365nd!, lastYear_noDepr: oLYnd!,
+              },
+        // Badge pct per period: the split in effect at that period's END, so
+        // "2025" shows the historic share while current periods show today's.
+        ownPctByPeriod: {
+          "30d": ownerPctForFirstNameAsOf(owners, ownerFirstName, "legal", periods["30d"].end),
+          "365d": ownerPctForFirstNameAsOf(owners, ownerFirstName, "legal", periods["365d"].end),
+          lastYear: ownerPctForFirstNameAsOf(owners, ownerFirstName, "legal", periods.lastYear.end),
+        },
         "30d": p30,
         "365d": p365,
         lastYear: pLY,
@@ -73,7 +114,7 @@ export default async function LedgerHome() {
 
   return (
     <main className="flex-1 px-6 py-12">
-      <div className="mx-auto w-full max-w-4xl space-y-6">
+      <div className="mx-auto w-full max-w-page space-y-6">
         <header className="flex items-start justify-between">
           <div>
             <h1 className="font-serif text-4xl font-medium tracking-tight">
@@ -140,7 +181,12 @@ export default async function LedgerHome() {
         )}
 
         {entities.length > 0 && (
-          <PortfolioComparison data={portfolioData} lastYear={lastYear} />
+          <PortfolioComparison
+            data={portfolioData}
+            lastYear={lastYear}
+            ownerName={ownerFirstName ? ownerFirstName[0].toUpperCase() + ownerFirstName.slice(1) : "You"}
+            canSeeOwnView={canSeeOwnView}
+          />
         )}
       </div>
     </main>

@@ -2,6 +2,7 @@ import Link from "next/link";
 import { accountBalances } from "@/lib/ledger/reports";
 import { listLoans } from "@/lib/ledger/loans";
 import { summarize, summarizeFromNow } from "@/lib/ledger/amortization";
+import { currentUserEntityAccessLevel } from "@/lib/ledger/access";
 import { Section } from "../section";
 import { Money } from "@/components/money";
 import { LoanForm } from "./loan-form";
@@ -14,7 +15,12 @@ export default async function LoansPage({
   params: Promise<{ entityId: string }>;
 }) {
   const { entityId } = await params;
-  const [loans, bals] = await Promise.all([listLoans(entityId), accountBalances(entityId)]);
+  const [loans, bals, accessLevel] = await Promise.all([
+    listLoans(entityId),
+    accountBalances(entityId),
+    currentUserEntityAccessLevel(entityId),
+  ]);
+  const readOnly = accessLevel !== "write";
 
   const liabilityAccounts = bals
     .filter(
@@ -101,12 +107,14 @@ export default async function LoansPage({
         );
       })}
 
-      <Section
-        title="Add a loan"
-        description="Enter the terms to generate an amortization schedule. Auto-posting of payment splits arrives with the Plaid feed (Phase 6b) so it won't double-count QuickBooks while QB is still authoritative."
-      >
-        <LoanForm entityId={entityId} liabilityAccounts={liabilityAccounts} interestAccounts={interestAccounts} bankAccounts={bankAccounts} />
-      </Section>
+      {!readOnly && (
+        <Section
+          title="Add a loan"
+          description="Enter the terms to generate an amortization schedule; the liability engine posts payment splits from the Plaid feed."
+        >
+          <LoanForm entityId={entityId} liabilityAccounts={liabilityAccounts} interestAccounts={interestAccounts} bankAccounts={bankAccounts} />
+        </Section>
+      )}
     </div>
   );
 }

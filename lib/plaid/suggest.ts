@@ -10,6 +10,7 @@ import {
   BOOKED_NEAR_DAYS,
   type AssignTarget,
 } from "@/lib/plaid/data";
+import { usdPlain } from "@/lib/ledger/format";
 
 /**
  * Opus 4.8 bank-account → (entity + ledger account) MATCHER.
@@ -261,8 +262,6 @@ function catalogBlock(targets: AssignTarget[]): string {
   );
 }
 
-const usd = (cents: number) =>
-  (cents / 100).toLocaleString("en-US", { style: "currency", currency: "USD" });
 
 type AcctToMatch = {
   rowId: string;
@@ -322,7 +321,7 @@ function plaidAccountsBlock(
     const t = txns.get(a.plaidAccountId) ?? [];
     if (t.length) {
       lines.push("  Recent transactions:");
-      for (const x of t) lines.push(`      • ${x.date}  ${x.name}  ${usd(x.cents)}`);
+      for (const x of t) lines.push(`      • ${x.date}  ${x.name}  ${usdPlain(x.cents)}`);
     } else {
       lines.push("  Recent transactions: (none synced yet)");
     }

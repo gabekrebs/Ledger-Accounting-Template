@@ -17,8 +17,8 @@ import Anthropic from "@anthropic-ai/sdk";
 import { listPendingTransactions } from "@/lib/plaid/data";
 import { extractParty, normalizeMerchant } from "@/lib/ledger/merchant";
 import { CANONICAL, type CanonicalKey } from "@/lib/ledger/canonical-accounts";
-import { loadRules, selectRule } from "@/lib/rules/engine";
-import { proposeLearnedRule, listProposedForEntity } from "@/lib/rules/store";
+import { coverageSets, coverageFor, latestDismissalAt } from "@/lib/rules/learner";
+import { proposeLearnedRule } from "@/lib/rules/store";
 import { buildPredicate, type ConditionRow } from "@/lib/rules/build";
 import {
   FIELD_REGISTRY,
@@ -26,10 +26,12 @@ import {
   type ConditionGroup,
   type ConditionOp,
   type FieldId,
-  type TxnFacts,
 } from "@/lib/rules/types";
 
-const MODEL = "claude-haiku-4-5";
+// Opus for rule authoring too (ADR-021: Haiku is retired from this codebase) —
+// a proposed rule shapes every future posting for its merchant, so it gets the
+// best judgment available; volume is a handful of calls per week.
+const MODEL = "claude-opus-4-8";
 
 let client: Anthropic | null = null;
 function getClient(): Anthropic | null {
@@ -46,14 +48,6 @@ const OPS = new Set<ConditionOp>([
   "eq", "neq", "contains", "startsWith", "endsWith", "matches", "in",
   "gt", "gte", "lt", "lte", "between",
 ]);
-
-function synthFacts(merchant: string): TxnFacts {
-  return {
-    merchant, rawName: merchant, amountCents: 0, direction: "outflow",
-    plaidCategoryPrimary: null, plaidCategoryDetailed: null, bankAccountSubtype: null,
-    isoCurrencyCode: null, dayOfMonth: 1, weekday: 0,
-  };
-}
 
 const SCHEMA = {
   type: "object",
@@ -174,14 +168,23 @@ export async function proposeRulesFromAI(entityId: string): Promise<AIProposeRes
   if (!a) return { proposed: 0, error: "ANTHROPIC_API_KEY is not set" };
 
   const pending = await listPendingTransactions(entityId);
-  // Aggregate by normalized merchant; only recurring, uncovered merchants.
-  const activeRules = await loadRules(entityId);
+  // Aggregate by normalized merchant; only uncovered merchants reach the model —
+  // active/proposed coverage is redundant, and a DISMISSED merchant is the owner
+  // saying "stop suggesting this one". Dismissal is evidence-scoped, not
+  // eternal: a pending charge dated after the dismissal is new activity, and
+  // new activity may re-earn a suggestion (owner's rule).
+  const sets = await coverageSets(entityId);
   const counts = new Map<string, { label: string; n: number }>();
   for (const t of pending) {
     const label = t.merchantName ?? extractParty({ memo: t.name }) ?? t.name ?? "";
     const key = normalizeMerchant(label);
     if (key.length < 3) continue;
-    if (selectRule(activeRules, synthFacts(key))) continue; // already covered
+    const cov = coverageFor(key, sets);
+    if (cov === "active" || cov === "proposed") continue;
+    if (cov === "dismissed") {
+      const at = latestDismissalAt(key, sets.dismissed);
+      if (at && String(t.txnDate) <= at.toISOString().slice(0, 10)) continue;
+    }
     const cur = counts.get(key) ?? { label, n: 0 };
     cur.n++;
     counts.set(key, cur);
@@ -196,7 +199,8 @@ export async function proposeRulesFromAI(entityId: string): Promise<AIProposeRes
   try {
     const msg = await a.messages.create({
       model: MODEL,
-      max_tokens: 4096,
+      max_tokens: 12000,
+      thinking: { type: "adaptive" },
       system: [
         { type: "text", text: SYSTEM },
         { type: "text", text: fieldsBlock() + "\n\n" + categoriesBlock(), cache_control: { type: "ephemeral", ttl: "1h" } },
@@ -218,12 +222,13 @@ export async function proposeRulesFromAI(entityId: string): Promise<AIProposeRes
     return { proposed: 0, error: e instanceof Error ? e.message : String(e) };
   }
 
-  // Dedup against ALL existing coverage — active AND already-proposed — and
-  // within this run, so re-clicking "Author with AI" can't flood the proposed
-  // queue with duplicates (loadRules returns active only).
-  const proposedExisting = await listProposedForEntity(entityId);
+  // Dedup against existing active/proposed coverage and within this run, so
+  // re-clicking "Author with AI" can't flood the proposed queue with
+  // duplicates. Dismissed predicates are deliberately NOT in this set — a
+  // merchant that got past the prompt filter above has post-dismissal activity
+  // and is allowed to come back, even with an identical predicate.
   const seen = new Set(
-    [...activeRules, ...proposedExisting].map((r) => JSON.stringify(r.predicate))
+    [...sets.active, ...sets.proposed].map((r) => JSON.stringify(r.predicate))
   );
   let proposed = 0;
   for (const raw of parsed.rules ?? []) {
@@ -239,6 +244,7 @@ export async function proposeRulesFromAI(entityId: string): Promise<AIProposeRes
       description: `AI: ${v.reasoning} (~${Math.round(v.confidence * 100)}%)`,
       predicate: v.predicate,
       action: v.action,
+      origin: "nl", // "from AI" badge — these are model-authored, not history
     });
     proposed++;
   }

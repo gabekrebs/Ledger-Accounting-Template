@@ -88,6 +88,37 @@ export function planInternalTransfer(
   };
 }
 
+/**
+ * True when this INFLOW's exact opposite sits pending in another of the
+ * entity's linked accounts — i.e. it is the counterpart half of a transfer
+ * that `planInternalTransfer` will book from the outflow side (this pass or a
+ * later one, resolving this row via linkTransferCounterpart). The inflow must
+ * stay untouched until then: letting a rule categorize it first books the move
+ * TWICE — once from each side (the 2026-08-06 KP 0209→2128 double-post, where
+ * the inflow was processed ahead of its outflow and a catch-all income rule
+ * claimed it). `some` rather than exactly-one on purpose: an ambiguous match
+ * defers the outflow to a human, and the inflow must wait for that call too.
+ */
+export function awaitingTransferOutflow(
+  txn: TransferTxn,
+  pending: TransferTxn[],
+  mappedByPlaidAcct: Map<string, string | null>,
+  excludeIds?: Set<string>
+): boolean {
+  if (txn.amountCents >= 0) return false;
+  if (!mappedByPlaidAcct.get(txn.plaidAccountId)) return false;
+  const day = ymd(txn.txnDate);
+  return pending.some(
+    (c) =>
+      c.id !== txn.id &&
+      !excludeIds?.has(c.id) &&
+      c.plaidAccountId !== txn.plaidAccountId &&
+      c.amountCents === -txn.amountCents &&
+      !!mappedByPlaidAcct.get(c.plaidAccountId) &&
+      daysApart(ymd(c.txnDate), day) <= WINDOW_DAYS
+  );
+}
+
 // Looks like a credit-card PAYMENT (a card token AND a payment token), not a
 // purchase. Covers Chase/Amex/Capital One/Discover/Citi/BoA/WF/etc. autopays.
 const CARD_TOKEN =
@@ -131,6 +162,99 @@ export async function loadCardContext(entityId: string): Promise<CardContext> {
 
 export interface CreditCardPaymentPlan {
   categoryAccountId: string; // the card liability to pay down
+}
+
+/**
+ * Review-Queue quieting (/review only). Both halves of a card payment
+ * auto-match via #2 as soon as the SECOND institution's feed syncs — usually
+ * 0–2 days after the first half lands. Until then the early half sits in the
+ * cross-entity queue as noise the owner would never act on. So /review hides a
+ * LIKELY card-payment half for QUEUE_HIDE_DAYS after we first stored it
+ * (created_at, not txn_date — the wait is for the other FEED, and a backfilled
+ * row's counterpart syncs relative to when we saw it). The entity Review tab
+ * never hides anything, and matching/posting is untouched — an unmatched half
+ * simply surfaces in the queue once the window lapses.
+ *
+ * This is RECOGNITION ONLY — nothing books off it, so the net is deliberately
+ * wider than the booking recognizer above (a false positive costs a 5-day
+ * queue delay, not a wrong entry). Safety against the flows that must NEVER
+ * be hidden (Zelle rent, inter-property management transfers, owner draws) is
+ * structural, not just lexical: an inflow only qualifies on a credit-card
+ * feed (income lands in checking), and a checking outflow needs BOTH card
+ * language and payment language — plain "Online Transfer"/Zelle descriptors
+ * have neither.
+ */
+// 5 on purpose: the same span as WINDOW_DAYS above, so a half stays quiet for
+// exactly as long as the matcher could still pair it.
+export const QUEUE_HIDE_DAYS = 5;
+
+// Card-feed inflow descriptors seen in production: "Payment Thank You - Web",
+// "Payment Received", "AUTOMATIC PAYMENT - THANK", "ONLINE PAYMENT - THANK
+// YOU", "ELECTRONIC PAYMENT RECEIVED-THANK", "PAYMENT RECEIVED -- THANK".
+// Refunds/statement credits (the other card inflows) read as merchant names
+// ("Target", "AMEX RIDESHARE CREDIT") and don't match.
+const CARD_INFLOW_PAY =
+  /payment[\s-]*(received|thank)|(automatic|online|electronic|mobile|web)\s+payment|auto\s*-?pay|payment\s+thank\s+you|received\s*-+\s*thank/i;
+
+// Checking-side extras beyond CARD_TOKEN: bank-ACH descriptors run words
+// together ("CREDITCARDSEC:WEB") and bill-pay memos name the card without
+// "credit" ("Payment to Chase card ending in 6440").
+const QUEUE_CARD_TOKEN = /creditcard|\bcard ending\b|to\s+\w+\s+card\b/i;
+
+// Plaid's own verdict — strong when present, but NOT sufficient alone for
+// hiding (it also stamps some card-feed payments LOAN_DISBURSEMENTS) nor
+// required (descriptors carry the cases it mislabels).
+const PFC_CARD_PAYMENT = "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT";
+
+/**
+ * Does this pending row read as ONE HALF of a credit-card payment? `accountType`
+ * is the source feed's bk_plaid_accounts.type ("credit" = a card feed).
+ */
+export function isLikelyCardPaymentSide(txn: {
+  amountCents: number;
+  name: string | null;
+  merchantName: string | null;
+  plaidCategory: unknown;
+  accountType: string | null;
+}): boolean {
+  const label = `${txn.name ?? ""} ${txn.merchantName ?? ""}`;
+  const detailed =
+    (txn.plaidCategory as { detailed?: string } | null)?.detailed ?? "";
+  const onCard = (txn.accountType ?? "").toLowerCase() === "credit";
+  // The payment ARRIVING on the card (inflow on a credit feed).
+  if (onCard && txn.amountCents < 0)
+    return detailed === PFC_CARD_PAYMENT || CARD_INFLOW_PAY.test(label);
+  // The payment LEAVING checking (outflow on a non-card feed).
+  if (!onCard && txn.amountCents > 0)
+    return (
+      detailed === PFC_CARD_PAYMENT ||
+      ((CARD_TOKEN.test(label) || QUEUE_CARD_TOKEN.test(label)) &&
+        PAY_TOKEN.test(label))
+    );
+  return false;
+}
+
+/** Hide this row from the cross-entity /review queue? True while a likely
+ * card-payment half is still inside its match window. */
+export function hiddenFromReviewQueue(
+  txn: {
+    amountCents: number;
+    name: string | null;
+    merchantName: string | null;
+    plaidCategory: unknown;
+    accountType: string | null;
+    createdAt: Date | null;
+    txnDate: string | Date;
+  },
+  now: number = Date.now()
+): boolean {
+  if (!isLikelyCardPaymentSide(txn)) return false;
+  // First-seen clock; a row missing created_at (shouldn't happen) falls back
+  // to its bank date so it can never be hidden indefinitely.
+  const firstSeen = txn.createdAt
+    ? txn.createdAt.getTime()
+    : Date.parse(ymd(txn.txnDate) + "T00:00:00Z");
+  return now - firstSeen < QUEUE_HIDE_DAYS * 86400000;
 }
 
 /**

@@ -112,8 +112,8 @@ export function EntryEditor({
   }
 
   return (
-    <tr className="border-b border-hair/60 bg-paper/40">
-      <td colSpan={5} className="px-3 py-4">
+    <tr className="border-b border-hair/60 bg-paper/40 max-sm:block">
+      <td colSpan={5} className="px-3 py-4 max-sm:block max-sm:px-0">
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-faint">

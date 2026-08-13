@@ -55,6 +55,3 @@ export function safeNextPath(next: string | null | undefined): string {
   return next;
 }
 
-// Email allowlisting moved to `lib/ledger/access.ts` (`isEmailAllowed`) — it is
-// now DB-aware (env AUTH_ALLOWED_EMAILS ∪ active bk_app_users) so users added
-// in-product can sign in without a redeploy.

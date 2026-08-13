@@ -71,16 +71,3 @@ export async function dismissGlobalRule(
   }
 }
 
-export async function toggleGlobalRule(
-  ruleId: string,
-  patch: { enabled?: boolean; autoApply?: boolean; status?: "active" | "archived" }
-): Promise<{ ok: boolean; error?: string }> {
-  await assertAdmin();
-  try {
-    await setRuleFlag(ruleId, patch, await actor());
-    revalidatePath("/ledger/rules");
-    return { ok: true };
-  } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
-  }
-}

@@ -29,7 +29,7 @@ import type { PostSplit } from "@/lib/plaid/post";
  * servicer sales, and is self-damping — an interest misestimate moves the
  * booked balance, which moves the next month's interest the other way, and
  * the annual 1098 true-up zeroes any residue (owner: "optimize for automation;
- * within a few dollars is fine"). Verified against real servicer statements:
+ * within a few dollars is fine"). Verified against real Shellpoint statements:
  * penny-exact when the GL matches the servicer's principal.
  *
  * The escrow RESIDUAL is what makes annual escrow re-analysis a non-event: the

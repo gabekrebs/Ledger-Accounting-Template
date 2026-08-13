@@ -13,6 +13,7 @@ import {
   unique,
   index,
   check,
+  primaryKey,
 } from "drizzle-orm/pg-core";
 import type { ConditionGroup, ActionSpec } from "@/lib/rules/types";
 
@@ -33,12 +34,14 @@ import type { ConditionGroup, ActionSpec } from "@/lib/rules/types";
 /**
  * App users managed in-product (the self-serve counterpart to the env-var
  * allowlists). The login gate admits env `AUTH_ALLOWED_EMAILS` ∪ ACTIVE rows
- * here; `role = 'admin'` grants full access to every entity (like
- * `AUTH_ADMIN_EMAILS`), `role = 'member'` is scoped by `bk_entity_access`.
- * The env vars remain as bootstrap/break-glass — deleting every row here can
- * never lock out an env-listed admin. Rows reference Supabase auth users by
- * email; deleting a row revokes app access but never deletes the auth user
- * (the Supabase project's `auth.users` is shared across apps).
+ * here. Roles: 'owner' (and legacy alias 'admin') grants full access to every
+ * entity, like `AUTH_ADMIN_EMAILS`; 'accountant', 'business_partner', and
+ * legacy 'member' are scoped per-entity by `bk_entity_access` (whose
+ * access_level decides read vs write). The env vars remain as
+ * bootstrap/break-glass — deleting every row here can never lock out an
+ * env-listed admin. Rows reference Supabase auth users by email; deleting a
+ * row revokes app access but never deletes the auth user (the Supabase
+ * project's `auth.users` is shared across apps).
  */
 export const bkAppUsers = pgTable(
   "bk_app_users",
@@ -48,7 +51,8 @@ export const bkAppUsers = pgTable(
     displayName: text("display_name"),
     firstName: text("first_name"),
     lastName: text("last_name"),
-    role: text("role").notNull().default("member"), // 'admin' | 'member'
+    // 'owner' | 'admin' (legacy alias) | 'accountant' | 'business_partner' | 'member'
+    role: text("role").notNull().default("member"),
     active: boolean("active").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
     createdBy: text("created_by"),
@@ -59,9 +63,10 @@ export const bkAppUsers = pgTable(
 /**
  * Per-user entity access grants. The login allowlist (`AUTH_ALLOWED_EMAILS`
  * + active `bk_app_users`) answers "may this email sign in?"; this table answers
- * "which entities may they see?". Admins (`AUTH_ADMIN_EMAILS` + `bk_app_users`
- * role 'admin') bypass this and see everything; a non-admin signed-in user sees
- * exactly the entities they have a row for (none = nothing).
+ * "which entities may they see?". Owner-tier users (`AUTH_ADMIN_EMAILS` +
+ * `bk_app_users` role 'owner'/'admin') bypass this and see everything; every
+ * other signed-in user sees exactly the entities they have a row for
+ * (none = nothing).
  */
 export const bkEntityAccess = pgTable(
   "bk_entity_access",
@@ -71,11 +76,54 @@ export const bkEntityAccess = pgTable(
     entityId: uuid("entity_id")
       .notNull()
       .references(() => bkLedgerEntities.id, { onDelete: "cascade" }),
+    // Per-entity capability. Absence of a row = no access; a row grants either
+    // 'read' (view only) or 'write' (bookkeeping mutations). Added by direct
+    // ALTER (scripts/add-rbac-and-audit.mjs); default 'read'. Owner bypasses.
+    accessLevel: text("access_level").notNull().default("read"),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
   },
   (t) => [
     unique("bk_entity_access_email_entity_uq").on(t.userEmail, t.entityId),
     index("bk_entity_access_email_idx").on(t.userEmail),
+  ]
+);
+
+/**
+ * Admin review log — every meaningful WRITE by a NON-admin user is recorded here
+ * for the owner to review. Owner/admin actions are NOT logged (the owner is the
+ * reviewer). Rows are append-only in practice; only the review flags
+ * (`reviewed`/`reviewedAt`/`reviewedBy`) are updated. Written by `logAudit`
+ * (plus system alerts like `plaid_source_drift` from the sync), read only by
+ * the admin `/teamactivity` page. Added by direct ALTER
+ * (scripts/add-rbac-and-audit.mjs), RLS-locked in the same migration.
+ */
+export const bkAuditLog = pgTable(
+  "bk_audit_log",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    actorEmail: text("actor_email").notNull(),
+    actorRole: text("actor_role").notNull(), // 'accountant' | 'business_partner' | 'system'
+    entityId: uuid("entity_id")
+      .notNull()
+      .references(() => bkLedgerEntities.id, { onDelete: "cascade" }),
+    actionType: text("action_type").notNull(), // e.g. 'post_transaction'
+    objectTable: text("object_table"), // e.g. 'bk_journal_entries'
+    objectId: text("object_id"),
+    description: text("description").notNull(), // short human-readable summary
+    beforeJson: jsonb("before_json"), // prior state where practical
+    afterJson: jsonb("after_json"), // new state where practical
+    affectedLedger: boolean("affected_ledger").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    reviewed: boolean("reviewed").notNull().default(false),
+    reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
+    reviewedBy: text("reviewed_by"),
+  },
+  (t) => [
+    index("bk_audit_log_entity_reviewed_idx").on(t.entityId, t.reviewed),
+    index("bk_audit_log_reviewed_created_idx").on(t.reviewed, t.createdAt),
+    index("bk_audit_log_actor_idx").on(t.actorEmail),
   ]
 );
 
@@ -94,6 +142,9 @@ export const bkLedgerEntities = pgTable("bk_ledger_entities", {
   // split works zero-config for any entity / new onboard. UI-editable.
   formationDate: date("formation_date"),
   importedThrough: date("imported_through"), // high-water mark of imported txns
+  // Short display name for the home-page launcher. Null = show `name`.
+  // Added by scripts/add-entity-nickname.mjs.
+  nickname: text("nickname"),
   // REMOVED FEATURE (2026-07): `qbo_sync_enabled` — the QBO nightly-import
   // toggle. The import itself was deleted with the QBO integration (ADR-008);
   // the flag lingered as dead UI. The COLUMN still exists in the database
@@ -120,15 +171,19 @@ export const bkLedgerEntities = pgTable("bk_ledger_entities", {
   // equity_stake: this entity's value = parent entity's valuation × ownership %.
   parentEntityId: uuid("parent_entity_id"),
   ownershipPct: numeric("ownership_pct"), // 0–100; nullable (only for equity_stake)
-  // [{name: string, pct: number}] — partner/owner roster for the capital & returns views.
-  owners: jsonb("owners").$type<{ name: string; pct: number }[]>(),
+  // [{name: string, pct: number, reportingPct?: number}] — partner/owner roster
+  // for the capital & returns views. `pct` is the LEGAL ownership (books, taxes,
+  // true-up). `reportingPct`, when present, is the owner's ECONOMIC share for
+  // personal reporting (/comparison) — used when the legal split temporarily
+  // parks a partner's stake with someone else.
+  owners: jsonb("owners").$type<{ name: string; pct: number; reportingPct?: number }[]>(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
 
 /**
  * A valuation COMPONENT = one physical structure/parcel inside a market-method
  * entity. Most entities have exactly one (the house); some hold several on one
- * lot (one parcel = a duplex + a separate house), and the entity's market
+ * lot (1032 SE 12th = a duplex + a separate house), and the entity's market
  * value is the SUM of its components' chosen values. Collapsing the single- and
  * multi-structure cases into one list keeps the model + UI uniform.
  */
@@ -139,7 +194,7 @@ export const bkValuationComponents = pgTable(
     entityId: uuid("entity_id")
       .notNull()
       .references(() => bkLedgerEntities.id, { onDelete: "cascade" }),
-    label: text("label").notNull(), // e.g. "House — 123 Main St", "Duplex — 45-47 Oak Ave"
+    label: text("label").notNull(), // e.g. "House — 123 Main St", "Duplex — 125-127 Main St"
     address: text("address"),
     zillowUrl: text("zillow_url"),
     redfinUrl: text("redfin_url"),
@@ -378,6 +433,80 @@ export const bkReconciliations = pgTable(
 );
 
 /**
+ * Manual balance checkpoints for the per-entity Reconciliation view — one row
+ * per "I looked at the real statement/portal and the balance was X on date D"
+ * assertion, for accounts with no Plaid feed (non-mortgage loans, unlinked
+ * bank/credit-card accounts). Append-only history; the view reads only the
+ * most-recent `as_of_date` row per account. `actual_balance_cents` is entered
+ * in the account's NATURAL sign (a loan's balance owed is positive), matching
+ * the statement-tie convention. Keyed by `account_qbo_id` (the GL route key,
+ * same as bk_loans' account links) with no FK — a checkpoint is a historical
+ * observation, not live state, so it survives account/entity churn.
+ *
+ * Created by scripts/add-account-recon.mjs (direct ALTER, not drizzle-kit) and
+ * deliberately KEPT OUT of drizzle.config.ts `tablesFilter` so drizzle-kit
+ * never diffs it.
+ */
+export const bkAccountRecon = pgTable(
+  "bk_account_recon",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    entityId: uuid("entity_id").notNull(),
+    accountQboId: text("account_qbo_id").notNull(),
+    asOfDate: date("as_of_date").notNull(),
+    actualBalanceCents: bigint("actual_balance_cents", {
+      mode: "number",
+    }).notNull(),
+    note: text("note"),
+    createdBy: text("created_by"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    // "Latest checkpoint per account" is the only read path.
+    index("bk_account_recon_lookup_idx").on(
+      t.entityId,
+      t.accountQboId,
+      t.asOfDate.desc()
+    ),
+  ]
+);
+
+/**
+ * Sync-observation memory for the Reconciliation view's Plaid rows — one row
+ * per mapped account recording when the book-vs-bank residual was last within
+ * tolerance and, if it currently isn't, when that streak started. This is what
+ * lets the status pill distinguish "settling" (a residual younger than the
+ * grace window — pending charges the bank counts but Plaid hasn't delivered
+ * yet; self-corrects) from a GENUINE discrepancy that has persisted. Stamped
+ * by every reconStatus() pass (page render + the daily cron sweeps). Pure
+ * derived state — safe to truncate, it rebuilds from observations.
+ *
+ * Created by scripts/add-recon-state.mjs (direct ALTER, not drizzle-kit) and
+ * deliberately KEPT OUT of drizzle.config.ts `tablesFilter`.
+ */
+export const bkAccountReconState = pgTable("bk_account_recon_state", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  entityId: uuid("entity_id")
+    .notNull()
+    .references(() => bkLedgerEntities.id, { onDelete: "cascade" }),
+  accountId: uuid("account_id")
+    .notNull()
+    .unique()
+    .references(() => bkAccounts.id, { onDelete: "cascade" }),
+  /** First observation of the current out-of-tolerance streak; null = in sync. */
+  offSince: timestamp("off_since", { withTimezone: true }),
+  lastInSyncAt: timestamp("last_in_sync_at", { withTimezone: true }),
+  lastResidualCents: bigint("last_residual_cents", { mode: "number" })
+    .notNull()
+    .default(0),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+/**
  * Append-only audit trail for in-product transaction edits (book-of-record).
  *
  * One row per field changed. `lineId` is set for a line-level change (the only
@@ -487,6 +616,9 @@ export const bkPlaidAccounts = pgTable(
     // Which ledger (QBO-mirrored) account this bank account posts to. Null until
     // the user maps it on the Bank review screen; required before posting.
     mappedAccountId: uuid("mapped_account_id").references(() => bkAccounts.id),
+    // Never store this account's transactions (a personal account a bank login
+    // forced along, e.g. the Barclays Skywards card). Sync skips it entirely.
+    syncExcluded: boolean("sync_excluded").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
   },
@@ -533,10 +665,16 @@ export const bkPlaidTransactions = pgTable(
     suggestedReasoning: text("suggested_reasoning"),
     suggestionSource: text("suggestion_source"), // 'history' | 'ai'
     suggestedAt: timestamp("suggested_at", { withTimezone: true }),
+    // AI-cleaned vendor name — pre-fills the review row's payee field (the raw
+    // descriptor stays visible underneath). Null = no clean name suggested.
+    suggestedPayee: text("suggested_payee"),
+    // Evidence bucket the suggestion fell into at suggestion time (e.g.
+    // "ai|seen|b90") — joins to bk_autopost_buckets for calibration + gating.
+    suggestionBucket: text("suggestion_bucket"),
     // Rules-engine marks (added by scripts/add-rules-engine.mjs, suggested_*
-    // precedent). `reviewReason` = why this txn is waiting (e.g. a fingerprint
-    // proposal the approved-rules-only gate no longer auto-posts). `matchedRuleId`
-    // = the rule the last auto-post sweep matched (null when none / fingerprint).
+    // precedent). `reviewReason` = why this txn is waiting (a matching non-auto
+    // rule, a gate deferral, pre-cutoff). `matchedRuleId` = the rule the last
+    // auto-post sweep matched (null when none).
     // Both are the sweep's RECORD; the review page recomputes the live match.
     reviewReason: text("review_reason"),
     matchedRuleId: uuid("matched_rule_id").references(() => bkRules.id, {
@@ -555,6 +693,7 @@ export const bkPlaidTransactions = pgTable(
     index("bk_plaid_txns_journal_entry_idx").on(t.journalEntryId),
   ]
 );
+
 
 /**
  * Open/closed Anthropic Batch-API jobs for category suggestions (Phase 3b). The
@@ -731,13 +870,39 @@ export const bkCategorizationEvents = pgTable(
     ruleId: uuid("rule_id").references(() => bkRules.id, {
       onDelete: "set null",
     }),
-    decisionSource: text("decision_source").notNull(), // 'rule'|'fingerprint'|'recognizer'|'ai'|'manual'
-    outcome: text("outcome").notNull(), // 'auto_posted'|'proposed'|'applied_manual'|'skipped'|'ignored'|'leave_uncategorized'
+    // 'rule' | 'recognizer' | 'ai' | 'manual' ('fingerprint' appears on legacy rows only)
+    decisionSource: text("decision_source").notNull(),
+    // Sweep decisions: 'auto_posted' | 'proposed' | 'applied_manual' | 'skipped'
+    // | 'leave_uncategorized'. Suggestion lifecycle (ADR-021): one 'suggested'
+    // row per suggestion shown, then the SAME row is stamped 'accepted' |
+    // 'corrected' | 'ignored' | 'auto_posted' | 'superseded' when decided.
+    outcome: text("outcome").notNull(),
     actionKind: text("action_kind"),
     confidence: numeric("confidence", { mode: "number" }),
     reason: text("reason"),
     detail: jsonb("detail"),
     createdBy: text("created_by"),
+    // Suggestion-lifecycle fields (ADR-021 evidence ledger). One 'suggested'
+    // row per suggestion shown; the decision (accepted/corrected/ignored/
+    // auto_posted) is stamped onto the SAME row so calibration reads
+    // one-row-per-suggestion. `detail` carries the evidence snapshot (similar
+    // txns shown, merchant intel used, history hint) for future-model replay.
+    suggestedAccountId: uuid("suggested_account_id").references(
+      () => bkAccounts.id,
+      { onDelete: "set null" }
+    ),
+    postedAccountId: uuid("posted_account_id").references(() => bkAccounts.id, {
+      onDelete: "set null",
+    }),
+    merchantKey: text("merchant_key"),
+    amountCents: bigint("amount_cents", { mode: "number" }),
+    bucketKey: text("bucket_key"),
+    model: text("model"),
+    promptVersion: text("prompt_version"),
+    suggestedPayee: text("suggested_payee"),
+    wouldAutoPost: boolean("would_auto_post"),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    decidedBy: text("decided_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
   },
   (t) => [
@@ -745,8 +910,51 @@ export const bkCategorizationEvents = pgTable(
     index("bk_categorization_events_txn_idx").on(t.plaidTxnId),
     index("bk_categorization_events_rule_idx").on(t.ruleId),
     index("bk_categorization_events_entry_idx").on(t.journalEntryId),
+    index("bk_categorization_events_bucket_idx").on(t.bucketKey, t.outcome),
+    index("bk_categorization_events_merchant_idx").on(t.merchantKey),
   ]
 );
+
+/**
+ * Web-enriched merchant profiles, one per normalized merchant key, shared
+ * across every entity. Assistive context for the AI categorizer — never an
+ * executable mapping (likely_category is a human-readable concept, not an
+ * account id). `owner_category` records what the owner actually books this
+ * merchant to when it differs, so the profile converges on his reality.
+ */
+export const bkMerchantIntel = pgTable("bk_merchant_intel", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  merchantKey: text("merchant_key").notNull().unique(),
+  displayName: text("display_name"),
+  businessType: text("business_type"),
+  likelyCategory: text("likely_category"),
+  notes: text("notes"),
+  source: text("source").notNull().default("web"), // 'web' | 'model'
+  confidence: numeric("confidence", { mode: "number" }),
+  ownerCategory: text("owner_category"),
+  sampleRaw: text("sample_raw"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
+});
+
+/**
+ * Per-evidence-bucket measured precision + the state machine gating AI
+ * auto-posts: 'shadow' (measuring) → 'unlocked' (≥98% precision over ≥50
+ * outcomes) → 'locked' (a correction re-locks instantly). The nightly
+ * calibration sweep maintains counts from bk_categorization_events; the
+ * review UI reads measured_precision as the displayed calibrated %.
+ */
+export const bkAutopostBuckets = pgTable("bk_autopost_buckets", {
+  bucketKey: text("bucket_key").primaryKey(),
+  status: text("status").notNull().default("shadow"),
+  outcomes: integer("outcomes").notNull().default(0),
+  correct: integer("correct").notNull().default(0),
+  measuredPrecision: numeric("measured_precision", { mode: "number" }),
+  unlockedAt: timestamp("unlocked_at", { withTimezone: true }),
+  lockedAt: timestamp("locked_at", { withTimezone: true }),
+  lockReason: text("lock_reason"),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
+});
 
 /**
  * Append-only rule-change audit (mirrors bk_journal_edits): one row per field
@@ -769,3 +977,128 @@ export const bkRuleEdits = pgTable(
   },
   (t) => [index("bk_rule_edits_rule_idx").on(t.ruleId)]
 );
+
+
+/**
+ * Utility tracker (2026-07-30): entities whose long-term tenants don't pay
+ * their own utilities get a Utilities tab summarizing owner-covered spend,
+ * sourced from the Plaid staging feed. One group per building; matchers pin
+ * (bank account, descriptor fragment) → category — the bank account is the
+ * address discriminator (each building pays from its own checking account).
+ * Ships via scripts/add-utility-tracker.mjs; kept OUT of drizzle tablesFilter.
+ */
+export const bkUtilityGroups = pgTable(
+  "bk_utility_groups",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    entityId: uuid("entity_id")
+      .notNull()
+      .references(() => bkLedgerEntities.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    sortOrder: integer("sort_order").notNull().default(0),
+    /** First payment date that counts (e.g. when the building went long-term). */
+    trackingStart: date("tracking_start").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [unique("bk_utility_groups_entity_id_name_key").on(t.entityId, t.name)]
+);
+
+export const bkUtilityMatchers = pgTable(
+  "bk_utility_matchers",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    groupId: uuid("group_id")
+      .notNull()
+      .references(() => bkUtilityGroups.id, { onDelete: "cascade" }),
+    category: text("category").notNull(), // display label: Electric, Gas, …
+    matchContains: text("match_contains").notNull(), // ILIKE fragment on raw name
+    plaidAccountId: uuid("plaid_account_id")
+      .notNull()
+      .references(() => bkPlaidAccounts.id, { onDelete: "cascade" }),
+    /** Optional categories (garbage) sit behind an include/exclude toggle. */
+    optional: boolean("optional").notNull().default(false),
+    sortOrder: integer("sort_order").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("bk_utility_matchers_group_id_category_match_contains_key").on(
+      t.groupId,
+      t.category,
+      t.matchContains
+    ),
+    index("bk_utility_matchers_group_idx").on(t.groupId),
+  ]
+);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/**
+ * Owner heads-up holds for the review queue — "a transaction like this is
+ * coming (exact |amount| and/or vendor substring, this entity, next N days);
+ * keep it out of ALL automation and in review". Checked FIRST in the
+ * auto-poster, ahead of recognizers and rules, which are never modified.
+ * A hold is only closed by the owner acknowledging it ("transaction found") —
+ * expiry stops the interception but keeps the hold listed, so an anomaly that
+ * never arrived is still chased down, never silently forgotten.
+ *
+ * Created by scripts/add-review-holds.mjs (direct ALTER, not drizzle-kit);
+ * deliberately KEPT OUT of drizzle.config.ts `tablesFilter`.
+ */
+export const bkReviewHolds = pgTable(
+  "bk_review_holds",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    entityId: uuid("entity_id")
+      .notNull()
+      .references(() => bkLedgerEntities.id, { onDelete: "cascade" }),
+    /** Exact |amount| when amountMaxCents is null; else the inclusive lower bound. */
+    amountCents: bigint("amount_cents", { mode: "number" }),
+    amountMaxCents: bigint("amount_max_cents", { mode: "number" }),
+    vendorText: text("vendor_text"),
+    note: text("note"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    matchCount: integer("match_count").notNull().default(0),
+    lastMatchedTxnId: uuid("last_matched_txn_id"),
+    lastMatchedAt: timestamp("last_matched_at", { withTimezone: true }),
+    acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }),
+    acknowledgedBy: text("acknowledged_by"),
+    createdBy: text("created_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("bk_review_holds_entity_idx").on(t.entityId)]
+);
+
+
+
+
+
+
+
+
+

@@ -11,10 +11,10 @@ import {
   removeUserAction,
   resetPasswordAction,
   setActiveAction,
-  setEntitiesAction,
+  setEntityLevelsAction,
   setRoleAction,
 } from "./actions";
-import type { AppRole } from "@/lib/ledger/users";
+import type { AppRole, EntityAccessLevel } from "@/lib/ledger/users";
 
 type Entity = { id: string; name: string };
 type User = {
@@ -24,8 +24,18 @@ type User = {
   role: AppRole;
   active: boolean;
   createdAt: string | null;
-  entities: { id: string; name: string | null }[];
+  entities: { id: string; name: string | null; accessLevel: EntityAccessLevel }[];
 };
+
+// Collaborator classifications. Accountant/Business Partner capability is
+const COLLAB_ROLES: { value: AppRole; label: string }[] = [
+  { value: "business_partner", label: "Business Partner" },
+  { value: "accountant", label: "Accountant" },
+];
+
+function isOwnerRole(role: AppRole): boolean {
+  return role === "owner" || role === "admin";
+}
 
 /** One-time credential banner — shown after a create/reset, never persisted. */
 function TempPasswordNotice({
@@ -36,12 +46,12 @@ function TempPasswordNotice({
   onDismiss: () => void;
 }) {
   return (
-    <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm">
-      <div className="font-medium text-amber-900">
+    <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm dark:border-amber-400/30 dark:bg-amber-400/10">
+      <div className="font-medium text-amber-900 dark:text-amber-200">
         Temporary password for {notice.email}
       </div>
       <div className="mt-1 flex items-center gap-3">
-        <code className="rounded bg-white px-2 py-1 font-mono text-amber-900 ring-1 ring-amber-200">
+        <code className="rounded bg-white px-2 py-1 font-mono text-amber-900 ring-1 ring-amber-200 dark:bg-black/40 dark:text-amber-200 dark:ring-amber-400/30">
           {notice.password}
         </code>
         <Button
@@ -58,40 +68,96 @@ function TempPasswordNotice({
           Dismiss
         </Button>
       </div>
-      <p className="mt-1.5 text-xs text-amber-800">
+      <p className="mt-1.5 text-xs text-amber-800 dark:text-amber-200/80">
         Shown once — share it securely. They can change it after signing in.
       </p>
     </div>
   );
 }
 
-function EntityChecklist({
-  entities,
-  selected,
-  onToggle,
+/** Role classification picker (Accountant / Business Partner). */
+function RolePicker({
+  role,
+  onChange,
 }: {
-  entities: Entity[];
-  selected: Set<string>;
-  onToggle: (id: string) => void;
+  role: AppRole;
+  onChange: (r: AppRole) => void;
 }) {
   return (
-    <div className="grid gap-1.5 sm:grid-cols-2">
-      {entities.map((e) => (
-        <label
-          key={e.id}
-          className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-sm hover:bg-paper"
+    <div className="flex gap-2">
+      {COLLAB_ROLES.map((r) => (
+        <button
+          key={r.value}
+          type="button"
+          onClick={() => onChange(r.value)}
+          className={`rounded-md border px-3 py-1.5 text-sm transition-colors ${
+            role === r.value
+              ? "border-foreground bg-foreground text-background"
+              : "border-hair hover:bg-paper"
+          }`}
         >
-          <input
-            type="checkbox"
-            checked={selected.has(e.id)}
-            onChange={() => onToggle(e.id)}
-            className="h-4 w-4 accent-foreground"
-          />
-          <span className="truncate">{e.name}</span>
-        </label>
+          {r.label}
+        </button>
       ))}
     </div>
   );
+}
+
+/** Per-entity None / Read-only / Read & write picker. `levels` omits no-access. */
+function EntityLevelPicker({
+  entities,
+  levels,
+  onSet,
+}: {
+  entities: Entity[];
+  levels: Map<string, EntityAccessLevel>;
+  onSet: (id: string, level: EntityAccessLevel | "none") => void;
+}) {
+  return (
+    <div className="space-y-1">
+      {entities.map((e) => {
+        const value = levels.get(e.id) ?? "none";
+        return (
+          <div
+            key={e.id}
+            className="flex items-center justify-between gap-3 rounded px-1.5 py-1 text-sm hover:bg-paper"
+          >
+            <span className="truncate">{e.name}</span>
+            <select
+              value={value}
+              onChange={(ev) => onSet(e.id, ev.target.value as EntityAccessLevel | "none")}
+              className="shrink-0 rounded-md border border-hair bg-background px-2 py-1 text-xs"
+            >
+              <option value="none">No access</option>
+              <option value="read">Read-only</option>
+              <option value="write">Read &amp; write</option>
+            </select>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function grantsFrom(levels: Map<string, EntityAccessLevel>) {
+  return [...levels.entries()].map(([entityId, accessLevel]) => ({
+    entityId,
+    accessLevel,
+  }));
+}
+
+function useLevels(initial?: { id: string; accessLevel: EntityAccessLevel }[]) {
+  const [levels, setLevels] = useState<Map<string, EntityAccessLevel>>(
+    () => new Map((initial ?? []).map((g) => [g.id, g.accessLevel]))
+  );
+  const set = (id: string, level: EntityAccessLevel | "none") =>
+    setLevels((prev) => {
+      const next = new Map(prev);
+      if (level === "none") next.delete(id);
+      else next.set(id, level);
+      return next;
+    });
+  return { levels, set, setLevels };
 }
 
 function AddUserForm({
@@ -104,15 +170,15 @@ function AddUserForm({
   const [open, setOpen] = useState(false);
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
-  const [role, setRole] = useState<AppRole>("member");
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [role, setRole] = useState<AppRole>("business_partner");
+  const { levels, set, setLevels } = useLevels();
   const [pending, startTransition] = useTransition();
 
   function reset() {
     setEmail("");
     setName("");
-    setRole("member");
-    setSelected(new Set());
+    setRole("business_partner");
+    setLevels(new Map());
   }
 
   function submit() {
@@ -120,29 +186,37 @@ function AddUserForm({
       toast.error("Email is required.");
       return;
     }
-    if (role === "member" && selected.size === 0) {
-      toast.error("Assign at least one entity (or grant full access).");
+    if (levels.size === 0) {
+      toast.error("Give them read or write access to at least one entity.");
       return;
     }
     startTransition(async () => {
-      const res = await createUserAction({
-        email: email.trim(),
-        displayName: name,
-        role,
-        entityIds: role === "admin" ? [] : [...selected],
-      });
-      if (!res.ok) {
-        toast.error(res.error ?? "Could not add the user.");
-        return;
+      try {
+        const res = await createUserAction({
+          email: email.trim(),
+          displayName: name,
+          role,
+          entityGrants: grantsFrom(levels),
+        });
+        if (!res.ok) {
+          toast.error(res.error ?? "Could not add the user.");
+          return;
+        }
+        if (res.tempPassword) {
+          onCredential({ email: email.trim().toLowerCase(), password: res.tempPassword });
+        } else if (res.reusedExistingLogin) {
+          toast.success("Added — they already had a login, so their existing password works.");
+        }
+        toast.success(`${email.trim().toLowerCase()} added`);
+        reset();
+        setOpen(false);
+      } catch (e) {
+        // The write may have still succeeded; surface the error and let the admin
+        // refresh — never leave the button stuck on "Adding…".
+        toast.error(
+          e instanceof Error ? e.message : "Something went wrong — refresh and check the list."
+        );
       }
-      if (res.tempPassword) {
-        onCredential({ email: email.trim().toLowerCase(), password: res.tempPassword });
-      } else if (res.reusedExistingLogin) {
-        toast.success("Added — they already had a login, so their existing password works.");
-      }
-      toast.success(`${email.trim().toLowerCase()} added`);
-      reset();
-      setOpen(false);
     });
   }
 
@@ -171,7 +245,7 @@ function AddUserForm({
           <Label htmlFor="new-user-name">Name (optional)</Label>
           <Input
             id="new-user-name"
-            placeholder="Joey Patino"
+            placeholder="Jane Smith"
             value={name}
             onChange={(e) => setName(e.target.value)}
           />
@@ -179,50 +253,17 @@ function AddUserForm({
       </div>
 
       <div className="space-y-2">
-        <Label>Access</Label>
-        <div className="flex gap-2">
-          <button
-            type="button"
-            onClick={() => setRole("member")}
-            className={`rounded-md border px-3 py-1.5 text-sm transition-colors ${
-              role === "member"
-                ? "border-foreground bg-foreground text-background"
-                : "border-hair hover:bg-paper"
-            }`}
-          >
-            Specific entities
-          </button>
-          <button
-            type="button"
-            onClick={() => setRole("admin")}
-            className={`rounded-md border px-3 py-1.5 text-sm transition-colors ${
-              role === "admin"
-                ? "border-foreground bg-foreground text-background"
-                : "border-hair hover:bg-paper"
-            }`}
-          >
-            Full access — all entities
-          </button>
-        </div>
-        {role === "member" && (
-          <EntityChecklist
-            entities={entities}
-            selected={selected}
-            onToggle={(id) =>
-              setSelected((prev) => {
-                const next = new Set(prev);
-                if (next.has(id)) next.delete(id);
-                else next.add(id);
-                return next;
-              })
-            }
-          />
-        )}
-        {role === "admin" && (
-          <p className="text-xs text-muted-foreground">
-            Sees every entity and can manage users and bank connections.
-          </p>
-        )}
+        <Label>Role</Label>
+        <RolePicker role={role} onChange={setRole} />
+      </div>
+
+      <div className="space-y-2">
+        <Label>Entity access</Label>
+        <p className="text-xs text-muted-foreground">
+          Choose per entity. Read-only can view everything; read &amp; write can
+          make bookkeeping changes (all logged for your review).
+        </p>
+        <EntityLevelPicker entities={entities} levels={levels} onSet={set} />
       </div>
 
       <div className="flex justify-end gap-2">
@@ -237,6 +278,10 @@ function AddUserForm({
   );
 }
 
+function levelBadge(level: EntityAccessLevel) {
+  return level === "write" ? "read/write" : "read-only";
+}
+
 function UserRow({
   user,
   entities,
@@ -246,45 +291,51 @@ function UserRow({
   entities: Entity[];
   onCredential: (n: { email: string; password: string }) => void;
 }) {
+  const owner = isOwnerRole(user.role);
   const [editing, setEditing] = useState(false);
-  const [role, setRole] = useState<AppRole>(user.role);
-  const [selected, setSelected] = useState<Set<string>>(
-    new Set(user.entities.map((e) => e.id))
+  const [role, setRole] = useState<AppRole>(
+    isOwnerRole(user.role) ? "business_partner" : user.role
   );
+  const { levels, set, setLevels } = useLevels(user.entities);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [pending, startTransition] = useTransition();
 
   function run(fn: () => Promise<{ ok: boolean; error?: string }>, done?: string) {
     startTransition(async () => {
-      const res = await fn();
-      if (!res.ok) toast.error(res.error ?? "Something went wrong.");
-      else if (done) toast.success(done);
+      try {
+        const res = await fn();
+        if (!res.ok) toast.error(res.error ?? "Something went wrong.");
+        else if (done) toast.success(done);
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "Something went wrong.");
+      }
     });
   }
 
   function saveAccess() {
-    if (role === "member" && selected.size === 0) {
-      toast.error("Assign at least one entity (or grant full access).");
+    if (levels.size === 0) {
+      toast.error("Give them access to at least one entity (or remove the user).");
       return;
     }
     startTransition(async () => {
-      if (role !== user.role) {
-        const r = await setRoleAction(user.id, role);
-        if (!r.ok) {
-          toast.error(r.error ?? "Could not change the role.");
+      try {
+        if (role !== user.role) {
+          const r = await setRoleAction(user.id, role);
+          if (!r.ok) {
+            toast.error(r.error ?? "Could not change the role.");
+            return;
+          }
+        }
+        const r2 = await setEntityLevelsAction(user.id, grantsFrom(levels));
+        if (!r2.ok) {
+          toast.error(r2.error ?? "Could not save entity access.");
           return;
         }
+        toast.success("Access updated");
+        setEditing(false);
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "Could not save — refresh and check.");
       }
-      const r2 = await setEntitiesAction(
-        user.id,
-        role === "admin" ? [] : [...selected]
-      );
-      if (!r2.ok) {
-        toast.error(r2.error ?? "Could not save entity access.");
-        return;
-      }
-      toast.success("Access updated");
-      setEditing(false);
     });
   }
 
@@ -294,38 +345,47 @@ function UserRow({
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <span className="font-medium">{user.displayName || user.email}</span>
-            {user.role === "admin" ? (
-              <Badge variant="secondary">Full access</Badge>
+            {owner ? (
+              <Badge variant="secondary">Owner — full access</Badge>
             ) : (
-              <Badge variant="outline">
-                {user.entities.length}{" "}
-                {user.entities.length === 1 ? "entity" : "entities"}
-              </Badge>
+              <>
+                <Badge variant="outline">
+                  {COLLAB_ROLES.find((r) => r.value === user.role)?.label ?? "Collaborator"}
+                </Badge>
+                <Badge variant="outline">
+                  {user.entities.length}{" "}
+                  {user.entities.length === 1 ? "entity" : "entities"}
+                </Badge>
+              </>
             )}
             {!user.active && <Badge variant="destructive">Deactivated</Badge>}
           </div>
           {user.displayName && (
             <div className="text-sm text-muted-foreground">{user.email}</div>
           )}
-          {user.role === "member" && user.entities.length > 0 && !editing && (
+          {!owner && user.entities.length > 0 && !editing && (
             <div className="mt-1 text-xs text-faint">
-              {user.entities.map((e) => e.name).join(" · ")}
+              {user.entities
+                .map((e) => `${e.name} (${levelBadge(e.accessLevel)})`)
+                .join(" · ")}
             </div>
           )}
         </div>
         <div className="flex shrink-0 flex-wrap gap-1.5">
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={pending}
-            onClick={() => {
-              setEditing((v) => !v);
-              setRole(user.role);
-              setSelected(new Set(user.entities.map((e) => e.id)));
-            }}
-          >
-            {editing ? "Cancel" : "Edit access"}
-          </Button>
+          {!owner && (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={pending}
+              onClick={() => {
+                setEditing((v) => !v);
+                setRole(user.role);
+                setLevels(new Map(user.entities.map((e) => [e.id, e.accessLevel])));
+              }}
+            >
+              {editing ? "Cancel" : "Edit access"}
+            </Button>
+          )}
           <Button
             size="sm"
             variant="outline"
@@ -379,46 +439,16 @@ function UserRow({
         </div>
       </div>
 
-      {editing && (
+      {editing && !owner && (
         <div className="mt-4 space-y-3 border-t border-hair pt-4">
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={() => setRole("member")}
-              className={`rounded-md border px-3 py-1.5 text-sm transition-colors ${
-                role === "member"
-                  ? "border-foreground bg-foreground text-background"
-                  : "border-hair hover:bg-paper"
-              }`}
-            >
-              Specific entities
-            </button>
-            <button
-              type="button"
-              onClick={() => setRole("admin")}
-              className={`rounded-md border px-3 py-1.5 text-sm transition-colors ${
-                role === "admin"
-                  ? "border-foreground bg-foreground text-background"
-                  : "border-hair hover:bg-paper"
-              }`}
-            >
-              Full access — all entities
-            </button>
+          <div className="space-y-2">
+            <Label>Role</Label>
+            <RolePicker role={role} onChange={setRole} />
           </div>
-          {role === "member" && (
-            <EntityChecklist
-              entities={entities}
-              selected={selected}
-              onToggle={(id) =>
-                setSelected((prev) => {
-                  const next = new Set(prev);
-                  if (next.has(id)) next.delete(id);
-                  else next.add(id);
-                  return next;
-                })
-              }
-            />
-          )}
+          <div className="space-y-2">
+            <Label>Entity access</Label>
+            <EntityLevelPicker entities={entities} levels={levels} onSet={set} />
+          </div>
           <div className="flex justify-end">
             <Button size="sm" onClick={saveAccess} disabled={pending}>
               {pending ? "Saving…" : "Save access"}
@@ -454,8 +484,9 @@ export function UsersClient({
       {users.length === 0 ? (
         <div className="rounded-lg border border-dashed border-hair px-6 py-10 text-center text-sm text-muted-foreground">
           No managed users yet. Click{" "}
-          <span className="font-medium text-foreground">Add user</span> to give
-          someone access to all entities or just the ones you pick.
+          <span className="font-medium text-foreground">Add user</span> to give an
+          accountant or business partner read or read/write access to the entities
+          you choose.
         </div>
       ) : (
         <div className="space-y-3">

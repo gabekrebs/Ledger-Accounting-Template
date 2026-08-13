@@ -9,6 +9,7 @@ import { cn } from "@/lib/utils";
 import { AccountCombobox } from "@/components/ui/account-combobox";
 import type { CategoryOption } from "../actions";
 import { loadManualEntryForm, createManualEntryAction } from "./actions";
+import { useEntityReadOnly } from "../capabilities";
 
 /**
  * Manual journal entry composer — the "New entry" affordance on the
@@ -18,7 +19,9 @@ import { loadManualEntryForm, createManualEntryAction } from "./actions";
  * only when debits equal credits to the penny.
  */
 export function NewEntryButton({ entityId }: { entityId: string }) {
+  const readOnly = useEntityReadOnly();
   const [open, setOpen] = useState(false);
+  if (readOnly) return null; // viewers can't compose journal entries
   return (
     <>
       <Button size="sm" onClick={() => setOpen(true)}>
@@ -39,7 +42,7 @@ interface LineDraft {
 }
 
 /** "1,234.56" → 123456 (integer cents); null when blank/invalid. */
-function parseCents(s: string): number | null {
+export function parseCents(s: string): number | null {
   const t = s.replace(/[$,\s]/g, "");
   if (t === "") return 0;
   if (!/^\d*\.?\d{0,2}$/.test(t)) return null;
@@ -370,10 +373,10 @@ function NewEntryPanel({
   );
 }
 
-const inputCls =
+export const inputCls =
   "h-8 w-full rounded-lg border border-hair bg-transparent px-2 text-sm outline-none focus-visible:border-evergreen focus-visible:ring-2 focus-visible:ring-evergreen/20 disabled:opacity-50";
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+export function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <label className="block space-y-1">
       <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-faint">
@@ -384,7 +387,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-function CloseIcon({ className }: { className?: string }) {
+export function CloseIcon({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 16 16" fill="none" aria-hidden>
       <path

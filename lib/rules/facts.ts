@@ -26,6 +26,8 @@ export interface FactsInput {
 export interface FactsContext {
   /** plaidAccountId → bank account subtype (checking, credit card, …). */
   subtypeByPlaidAcct?: Map<string, string | null>;
+  /** plaidAccountId → account mask (last four), for per-account routing. */
+  last4ByPlaidAcct?: Map<string, string | null>;
 }
 
 /** Strongest normalized merchant key, mirroring the fingerprint's first candidate. */
@@ -60,9 +62,10 @@ export function extractFacts(input: FactsInput, ctx: FactsContext = {}): TxnFact
     plaidCategoryPrimary: cat?.primary ?? null,
     plaidCategoryDetailed: cat?.detailed ?? null,
     bankAccountSubtype: ctx.subtypeByPlaidAcct?.get(input.plaidAccountId) ?? null,
+    accountLast4: ctx.last4ByPlaidAcct?.get(input.plaidAccountId) ?? null,
     isoCurrencyCode: input.isoCurrencyCode,
     dayOfMonth,
     weekday,
-    // reserved fields stay undefined until the underlying data is wired
+    // remaining reserved fields stay undefined until the underlying data is wired
   };
 }

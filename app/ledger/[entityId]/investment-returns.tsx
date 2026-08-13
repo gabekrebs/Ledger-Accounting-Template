@@ -337,7 +337,7 @@ export function InvestmentReturns(props: {
                 {w.label}
                 <span className="ml-2 text-xs text-faint">{w.hint}</span>
               </div>
-              <div className="h-2 rounded bg-[#EEEAE1]">
+              <div className="h-2 rounded bg-[#EEEAE1] dark:bg-hair">
                 <div
                   className={`h-2 rounded ${w.cents < 0 ? "bg-oxblood" : "bg-evergreen"}`}
                   style={{ width: `${(Math.abs(w.cents) / waysDenom) * 100}%` }}
@@ -358,7 +358,7 @@ export function InvestmentReturns(props: {
 
         {/* Tax benefit — NOT a return line. Deferred tax → lowers capital at risk. */}
         {hasDepreciation && (
-          <div className="mt-5 rounded-xl border border-hair bg-[#FAF8F3] p-4">
+          <div className="mt-5 rounded-xl border border-hair bg-[#FAF8F3] p-4 dark:bg-secondary">
             <div className="flex items-baseline justify-between">
               <span className="text-sm font-medium">
                 Tax deferred

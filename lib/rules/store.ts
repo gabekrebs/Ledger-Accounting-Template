@@ -5,10 +5,9 @@
  *     (mirrors `editTransaction`'s diff loop — append-only provenance for "who
  *     changed this rule and when").
  *   • `recordEvent` → `bk_categorization_events` (the append-only decision log).
- *   • `bumpApplied` / `bumpCorrected` → the counters that feed `ruleConfidence`.
- *   • `proposeLearnedRule` → the hook the FUTURE history→rule learner writes
- *     through (origin='learned', status='proposed', enabled=false). Unused this
- *     phase; present so the schema + call site exist.
+ *   • `bumpApplied` → the counters that feed `ruleConfidence`.
+ *   • `proposeLearnedRule` → the write path for every automated rule author
+ *     (history learner, AI-accept loop, AI author) — always proposed+disabled.
  */
 import { and, desc, eq, or, sql } from "drizzle-orm";
 import { db, schema, type DbOrTx } from "@/lib/db/client";
@@ -326,16 +325,6 @@ export async function bumpApplied(
     .where(eq(bkRules.id, ruleId));
 }
 
-export async function bumpCorrected(ruleId: string, n = 1, exec: DbOrTx = db): Promise<void> {
-  await exec
-    .update(bkRules)
-    .set({
-      correctedCount: sql`${bkRules.correctedCount} + ${n}`,
-      updatedAt: new Date(),
-    })
-    .where(eq(bkRules.id, ruleId));
-}
-
 export function precisionFor(rule: {
   appliedCount: number;
   correctedCount: number;
@@ -343,15 +332,20 @@ export function precisionFor(rule: {
   return ruleConfidence(rule.appliedCount, rule.correctedCount);
 }
 
-// ── Learner hook (UNUSED this phase) ─────────────────────────────────────────
+// ── Learner hook ─────────────────────────────────────────────────────────────
 
 /**
- * Insert a PROPOSED rule the history→rule learner discovered. Disabled and
- * non-active by construction, so it can never post until a human promotes it.
- * Present only so the learner (a later phase) has a stable write path.
+ * Insert a PROPOSED rule an automated author discovered (the history learner,
+ * the AI-accept loop, or the AI rule author). Disabled and non-active by
+ * construction, so it can never post until a human promotes it.
  */
 export async function proposeLearnedRule(
-  input: Omit<RuleInput, "enabled"> & { proposedFromTxnId?: string | null }
+  input: Omit<RuleInput, "enabled"> & {
+    proposedFromTxnId?: string | null;
+    /** 'learned' (history / accept-loop) or 'nl' (AI-authored) — drives the
+     * "from history" / "from AI" badge on the proposed-rules queue. */
+    origin?: "learned" | "nl";
+  }
 ): Promise<RuleRow> {
   await assertValid({ ...input, autoApply: false });
   const [row] = await db
@@ -364,7 +358,7 @@ export async function proposeLearnedRule(
       enabled: false,
       autoApply: false,
       status: "proposed",
-      origin: "learned",
+      origin: input.origin ?? "learned",
       rank: input.rank ?? 100,
       predicate: input.predicate,
       action: input.action,

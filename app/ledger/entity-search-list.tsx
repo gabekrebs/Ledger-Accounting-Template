@@ -67,13 +67,13 @@ export function EntitySearchList({ entities }: { entities: EntityListItem[] }) {
         <div className="grid gap-4 sm:grid-cols-2">
           {filtered.map((e) => (
             <Link key={e.id} href={`/ledger/${e.id}`}>
-              <Card className="transition-colors hover:border-zinc-400">
+              <Card className="transition-colors hover:border-zinc-400 dark:hover:border-zinc-500">
                 <CardHeader>
                   <CardTitle className="text-lg">{e.name}</CardTitle>
                   <CardDescription className="flex items-center gap-2">
                     {e.taxType && <Badge variant="secondary">{e.taxType}</Badge>}
                     {e.importedThrough && (
-                      <span className="text-xs text-zinc-500">
+                      <span className="text-xs text-zinc-500 dark:text-zinc-400">
                         through {e.importedThrough}
                       </span>
                     )}

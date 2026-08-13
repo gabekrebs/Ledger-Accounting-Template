@@ -1,19 +1,20 @@
 import { Fragment } from "react";
 import Link from "next/link";
-import { profitAndLoss, revenueByChannel, expenseSubtypeGroups, ledgerStats } from "@/lib/ledger/reports";
+import { profitAndLoss, revenueByChannel, expenseSubtypeGroups, ledgerStats, entityHasLocations } from "@/lib/ledger/reports";
+import { PlViewToggle } from "../pl-view-toggle";
 import { getEntityActivities } from "@/lib/ledger/manage-accounts";
 import { resolvePlPeriod, comparisonRange, rangeParams, type CompareMode } from "@/lib/ledger/pl-period";
 import { Money } from "@/components/money";
 import { PlDateControls } from "./date-controls";
 import { ActivityFilter } from "./activity-filter";
+import { variancePct } from "@/lib/ledger/format";
 
 export const dynamic = "force-dynamic";
 
 // ── Trailing comparison cells (prior amount + Δ%), only when comparison on ──
 const pct = (cur: number, prior: number): React.ReactNode => {
-  if (!prior) return <span className="text-faint">—</span>;
-  const v = ((cur - prior) / Math.abs(prior)) * 100;
-  const s = `${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(1)}%`;
+  const s = variancePct(cur, prior);
+  if (s === null) return <span className="text-faint">—</span>;
   return <span className="font-mono tabular-nums text-xs text-muted-foreground">{s}</span>;
 };
 const Cmp = ({ cmpOn, prior, cur, small }: { cmpOn: boolean; prior: number; cur: number; small?: boolean }) =>
@@ -103,10 +104,11 @@ export default async function PlPage({
   const cmpOn = !!cmpRange;
 
   const plOpts = { ...opts, activity: activityFilter };
-  const [pl, channels, subtypeGroups] = await Promise.all([
+  const [pl, channels, subtypeGroups, hasLocations] = await Promise.all([
     profitAndLoss(entityId, plOpts),
     revenueByChannel(entityId, plOpts),
     expenseSubtypeGroups(entityId, plOpts),
+    entityHasLocations(entityId),
   ]);
   const [cmpPl, cmpChannels, cmpSubtypeGroups] = cmpRange
     ? await Promise.all([
@@ -145,6 +147,9 @@ export default async function PlPage({
 
   return (
     <div className="space-y-5">
+      {/* View switch first, before any period/filter controls — per-address
+          is an alternate view of this same report (owner 2026-07-30). */}
+      {hasLocations && <PlViewToggle entityId={entityId} view="company" />}
       <PlDateControls
         base={base}
         years={years}

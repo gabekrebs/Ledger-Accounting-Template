@@ -32,6 +32,7 @@ export type ReviewReason =
   | "rule_not_auto"
   | "low_confidence"
   | "pre_cutoff"
+  | "owner_hold"
   | "ambiguous";
 
 export const REVIEW_REASON_LABEL: Record<ReviewReason, string> = {
@@ -50,6 +51,7 @@ export const REVIEW_REASON_LABEL: Record<ReviewReason, string> = {
   low_confidence: "Confidence below the auto bar",
   pre_cutoff:
     "Dated within the imported-books period — verify it isn't already booked (possibly inside a bundled entry)",
+  owner_hold: "Held at your request — matches a heads-up hold you placed",
   ambiguous: "Ambiguous — needs a human",
 };
 

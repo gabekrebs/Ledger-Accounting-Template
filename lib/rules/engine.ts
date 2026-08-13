@@ -66,12 +66,3 @@ export function selectRule(rules: RuleRow[], facts: TxnFacts): RuleRow | null {
   return null;
 }
 
-/**
- * Every rule whose predicate matches, in precedence order. Used for Gate 7's
- * ambiguity check: when more than one DISTINCT-action rule matches a txn, the
- * destination isn't unambiguous, so the auto-poster must defer to review rather
- * than silently let precedence pick a winner.
- */
-export function allMatchingRules(rules: RuleRow[], facts: TxnFacts): RuleRow[] {
-  return rules.filter((r) => matches(r.predicate as ConditionGroup, facts));
-}

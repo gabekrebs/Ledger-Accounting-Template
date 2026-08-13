@@ -8,10 +8,9 @@ import { Button } from "@/components/ui/button";
 
 /**
  * Runs the deterministic, NO-AI auto-poster for this entity: posts what the
- * structural recognizers (transfers, loans, owner payouts, card payments) and
- * the approved auto-apply rules are sure about — plus, until the fingerprint is
- * retired, merchants with unanimous history. Everything else stays in the inbox
- * for review. Re-runnable — idempotent.
+ * structural recognizers (transfers, loans, card payments) and the approved
+ * auto-apply rules are sure about. Everything else stays in the inbox for
+ * review. Re-runnable — idempotent.
  */
 export function AutoCategorizeButton({ entityId }: { entityId: string }) {
   const [busy, start] = useTransition();
@@ -30,7 +29,7 @@ export function AutoCategorizeButton({ entityId }: { entityId: string }) {
             (r.skippedDup ? ` · skipped ${r.skippedDup} possible dup` : "")
         );
       } else {
-        toast.info("Nothing to auto-post — no rule, recognizer, or history match");
+        toast.info("Nothing to auto-post — no rule or recognizer match");
       }
       router.refresh();
     });

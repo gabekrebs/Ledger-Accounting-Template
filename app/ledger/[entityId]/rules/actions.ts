@@ -1,7 +1,15 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { assertEntityAccess, currentUserIsAdmin } from "@/lib/ledger/access";
+import {
+  assertEntityAccess,
+  assertEntityWrite,
+  assertOwner,
+  currentUserIsAdmin,
+} from "@/lib/ledger/access";
+import { logAudit } from "@/lib/ledger/audit";
+import { limitAction } from "@/lib/security/rate-limit";
+import { actionIdentity } from "@/lib/security/rate-limit-identity";
 import { getCurrentUser } from "@/lib/supabase/auth-server";
 import {
   saveRule,
@@ -25,7 +33,7 @@ export async function saveEntityRule(
   entityId: string,
   payload: RulePayload
 ): Promise<{ ok: boolean; error?: string; ruleId?: string }> {
-  await assertEntityAccess(entityId);
+  await assertEntityWrite(entityId);
   try {
     // Edits to an inherited GLOBAL rule are admin-only and never re-scoped here.
     if (payload.ruleId) {
@@ -41,10 +49,26 @@ export async function saveEntityRule(
       );
       const scope = existing.scope as "global" | "entity";
       const { ruleId } = await saveRule(payload, scope, existing.entityId, await actor());
+      await logAudit({
+        entityId,
+        actionType: "update_rule",
+        objectTable: "bk_rules",
+        objectId: ruleId,
+        description: `Edited a ${scope} categorization rule`,
+        affectedLedger: false,
+      });
       revalidatePath(`/ledger/${entityId}/rules`);
       return { ok: true, ruleId };
     }
     const { ruleId } = await saveRule(payload, "entity", entityId, await actor());
+    await logAudit({
+      entityId,
+      actionType: "create_rule",
+      objectTable: "bk_rules",
+      objectId: ruleId,
+      description: "Created a new entity categorization rule",
+      affectedLedger: false,
+    });
     revalidatePath(`/ledger/${entityId}/rules`);
     return { ok: true, ruleId };
   } catch (e) {
@@ -66,23 +90,46 @@ export async function previewEntityRule(
 }
 
 
-/** Ask AI to author proposed rules for this entity's recurring merchants. */
+/**
+ * Ask AI to author proposed rules for this entity's recurring merchants.
+ * OWNER-ONLY: spends AI budget (accountants approve/dismiss proposals but
+ * never trigger the model).
+ */
 export async function aiProposeRules(
   entityId: string
 ): Promise<{ ok: boolean; error?: string; proposed?: number }> {
-  await assertEntityAccess(entityId);
+  await assertOwner();
+  await assertEntityAccess(entityId); // 404 on an unknown entity id
+  const rl = await limitAction("ai", await actionIdentity());
+  if (rl) return rl;
   const r = await proposeRulesFromAI(entityId);
   if (r.error) return { ok: false, error: r.error };
+  if ((r.proposed ?? 0) > 0) {
+    await logAudit({
+      entityId,
+      actionType: "ai_propose_rules",
+      objectTable: "bk_rules",
+      objectId: null,
+      description: `AI proposed ${r.proposed} new rules for review`,
+      affectedLedger: false,
+    });
+  }
   revalidatePath(`/ledger/${entityId}/rules`);
   return { ok: true, proposed: r.proposed };
 }
 
-/** Draft a rule from a natural-language phrase (returns a draft; writes nothing). */
+/**
+ * Draft a rule from a natural-language phrase (returns a draft; writes
+ * nothing). OWNER-ONLY: spends AI budget.
+ */
 export async function nlDraftRule(
   entityId: string,
   phrase: string
 ): Promise<{ ok: boolean; error?: string; draft?: NLDraft }> {
-  await assertEntityAccess(entityId);
+  await assertOwner();
+  await assertEntityAccess(entityId); // 404 on an unknown entity id
+  const rl = await limitAction("ai", await actionIdentity());
+  if (rl) return rl;
   const r = await draftRuleFromNL(entityId, phrase);
   if (r.error || !r.draft) return { ok: false, error: r.error ?? "no draft" };
   return { ok: true, draft: r.draft };
@@ -93,7 +140,7 @@ export async function approveRule(
   entityId: string,
   ruleId: string
 ): Promise<{ ok: boolean; error?: string }> {
-  await assertEntityAccess(entityId);
+  await assertEntityWrite(entityId);
   try {
     const existing = await getRule(ruleId);
     if (!existing) return { ok: false, error: "rule not found" };
@@ -103,6 +150,14 @@ export async function approveRule(
       existing.scope === "global" ? await currentUserIsAdmin() : false
     );
     await setRuleFlag(ruleId, { status: "active", enabled: true }, await actor());
+    await logAudit({
+      entityId,
+      actionType: "approve_rule",
+      objectTable: "bk_rules",
+      objectId: ruleId,
+      description: "Approved (activated) a proposed rule",
+      affectedLedger: false,
+    });
     revalidatePath(`/ledger/${entityId}/rules`);
     return { ok: true };
   } catch (e) {
@@ -115,7 +170,7 @@ export async function dismissRule(
   entityId: string,
   ruleId: string
 ): Promise<{ ok: boolean; error?: string }> {
-  await assertEntityAccess(entityId);
+  await assertEntityWrite(entityId);
   try {
     const existing = await getRule(ruleId);
     if (!existing) return { ok: false, error: "rule not found" };
@@ -125,6 +180,14 @@ export async function dismissRule(
       existing.scope === "global" ? await currentUserIsAdmin() : false
     );
     await setRuleFlag(ruleId, { status: "archived" }, await actor());
+    await logAudit({
+      entityId,
+      actionType: "dismiss_rule",
+      objectTable: "bk_rules",
+      objectId: ruleId,
+      description: "Dismissed (archived) a proposed rule",
+      affectedLedger: false,
+    });
     revalidatePath(`/ledger/${entityId}/rules`);
     return { ok: true };
   } catch (e) {
@@ -136,9 +199,17 @@ export async function applyRulePending(
   entityId: string,
   ruleId: string
 ): Promise<{ ok: boolean; error?: string; applied?: number; errors?: number }> {
-  await assertEntityAccess(entityId);
+  await assertEntityWrite(entityId);
   try {
     const r = await applyRuleToPending(ruleId, entityId, await actor());
+    await logAudit({
+      entityId,
+      actionType: "apply_rule_pending",
+      objectTable: "bk_rules",
+      objectId: ruleId,
+      description: `Applied a rule to ${r.applied ?? 0} pending transactions`,
+      affectedLedger: true,
+    });
     revalidatePath(`/ledger/${entityId}/rules`);
     revalidatePath(`/ledger/${entityId}/bank`);
     return { ok: true, ...r };
@@ -157,9 +228,17 @@ export async function applyRuleRetro(
   refused?: number;
   skipped?: number;
 }> {
-  await assertEntityAccess(entityId);
+  await assertEntityWrite(entityId);
   try {
     const r = await applyRuleRetroactive(ruleId, entityId, await actor());
+    await logAudit({
+      entityId,
+      actionType: "apply_rule_retroactive",
+      objectTable: "bk_rules",
+      objectId: ruleId,
+      description: `Retroactively recategorized ${r.updated ?? 0} posted transactions`,
+      affectedLedger: true,
+    });
     revalidatePath(`/ledger/${entityId}/rules`);
     revalidatePath(`/ledger/${entityId}`);
     return { ok: true, ...r };

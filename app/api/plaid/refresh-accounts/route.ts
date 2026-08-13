@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 import { db, schema } from "@/lib/db/client";
-import { getPlaid } from "@/lib/plaid/client";
+import { getPlaid, safePlaidError } from "@/lib/plaid/client";
 import { decryptToken } from "@/lib/plaid/crypto";
-import { currentUserIsAdmin } from "@/lib/ledger/access";
+import { currentUserIsOwner } from "@/lib/ledger/access";
+import { limitRoute } from "@/lib/security/rate-limit";
+import { actionIdentity } from "@/lib/security/rate-limit-identity";
 
 export const runtime = "nodejs";
 
@@ -19,14 +21,16 @@ const { bkPlaidItems, bkPlaidAccounts } = schema;
  * Only INSERTS/updates accounts — never deletes. An account the user deselects in
  * Plaid's UI (or one with posted history) is intentionally kept, so books are
  * never orphaned. New accounts arrive UNASSIGNED (entityId null), exactly like a
- * fresh link, and stay inert until the admin assigns an entity + ledger account.
- * Admin only.
+ * fresh link, and stay inert until the owner assigns an entity + ledger account.
+ * Owner only (bank-connection management never widens past the owner).
  * POST /api/plaid/refresh-accounts  { itemId }
  */
 export async function POST(request: NextRequest) {
-  if (!(await currentUserIsAdmin())) {
+  if (!(await currentUserIsOwner())) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
+  const limited = await limitRoute("plaidCredential", await actionIdentity());
+  if (limited) return limited;
   try {
     const { itemId } = await request.json();
     if (!itemId) {
@@ -96,7 +100,7 @@ export async function POST(request: NextRequest) {
         .where(eq(bkPlaidItems.id, item.id));
       if (fresh) synced = await syncItemTransactions(fresh);
     } catch (e) {
-      console.error("plaid/refresh-accounts sync:", e);
+      console.error("plaid/refresh-accounts sync:", safePlaidError(e));
       // non-fatal — the manual Sync button will pull them
     }
 
@@ -107,7 +111,7 @@ export async function POST(request: NextRequest) {
       synced,
     });
   } catch (err) {
-    console.error("plaid/refresh-accounts:", err);
+    console.error("plaid/refresh-accounts:", safePlaidError(err));
     return NextResponse.json(
       { error: "Could not refresh accounts" },
       { status: 500 }

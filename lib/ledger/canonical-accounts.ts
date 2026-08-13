@@ -41,10 +41,14 @@ export type CanonicalKey =
   | "expense.repairs"
   | "expense.hospitality"
   | "expense.supplies"
+  | "expense.professional"
+  | "expense.dues"
+  | "expense.bank_charges"
   | "expense.garbage"
   | "expense.utilities"
   | "expense.insurance"
   | "expense.property_tax"
+  | "expense.taxes_licenses"
   | "expense.other";
 
 interface CanonicalDef {
@@ -82,7 +86,7 @@ const CANONICAL: CanonicalDef[] = [
   { key: "income.capitalone", label: "Rental Income - Capital One", classification: "revenue", accountType: "Income", subtype: "SalesOfProductIncome", normalBalance: "credit", match: [/capital\s*one/i], fallback: "income.other", ensure: true },
   { key: "income.direct", label: "Rental Income - Direct", classification: "revenue", accountType: "Income", subtype: "SalesOfProductIncome", normalBalance: "credit", match: [/rental income\s*-\s*direct/i, /\bdirect\b/i], fallback: "income.other", ensure: true },
   // The last matcher is a deliberate weakest-case CONTAINS: entity charts carry
-  // decorated variants ("A: Rental Income - Main St") that the exact form
+  // decorated variants ("X: Rental Income - Prefixed") that the exact form
   // missed, stranding Airbnb deposits unresolvable. Channel-specific names
   // ("Rental Income - Airbnb") still win their own keys first — this only
   // catches what nothing more specific claimed.
@@ -93,10 +97,20 @@ const CANONICAL: CanonicalDef[] = [
   { key: "expense.repairs", label: "Repairs & Maintenance", classification: "expense", accountType: "Expense", subtype: "RepairMaintenance", normalBalance: "debit", match: [/repairs?\s*&?\s*maintenance/i, /\brepair/i, /\bmaintenance\b/i, /handyman/i], ensure: true },
   { key: "expense.hospitality", label: "Hospitality Essentials", classification: "expense", accountType: "Expense", subtype: "SuppliesMaterials", normalBalance: "debit", match: [/hospitality/i], ensure: true },
   { key: "expense.supplies", label: "Supplies", classification: "expense", accountType: "Expense", subtype: "SuppliesMaterials", normalBalance: "debit", match: [/unit supplies/i, /\bsupplies\b/i, /\bsupply\b/i], ensure: false },
+  { key: "expense.professional", label: "Professional Fees", classification: "expense", accountType: "Expense", subtype: "LegalProfessionalFees", normalBalance: "debit", match: [/professional\s*fees?/i, /\bprofessional\b/i, /legal\s*&?\s*professional/i], fallback: "expense.other", ensure: false },
+  { key: "expense.dues", label: "Dues & Subscriptions", classification: "expense", accountType: "Expense", subtype: "DuesSubscriptions", normalBalance: "debit", match: [/dues\s*&?\s*subscriptions?/i, /\bsubscriptions?\b/i, /\bdues\b/i], fallback: "expense.other", ensure: false },
+  { key: "expense.bank_charges", label: "Bank Service Charges", classification: "expense", accountType: "Expense", subtype: "BankCharges", normalBalance: "debit", match: [/bank\s*service\s*charges?/i, /bank\s*charges?/i], fallback: "expense.other", ensure: false },
   { key: "expense.garbage", label: "Garbage", classification: "expense", accountType: "Expense", subtype: "Utilities", normalBalance: "debit", match: [/\bgarbage\b/i, /\btrash\b/i, /\b(waste|refuse|recycl)/i, /disposal\s*(fee|service|&)/i], fallback: "expense.utilities", ensure: false },
   { key: "expense.utilities", label: "Utilities", classification: "expense", accountType: "Expense", subtype: "Utilities", normalBalance: "debit", match: [/^utilities$/i, /\butilit/i], ensure: false },
   { key: "expense.insurance", label: "Insurance", classification: "expense", accountType: "Expense", subtype: "Insurance", normalBalance: "debit", match: [/\binsurance\b/i], ensure: false },
   { key: "expense.property_tax", label: "Property Taxes", classification: "expense", accountType: "Expense", subtype: "TaxesPaid", normalBalance: "debit", match: [/property\s*tax/i, /real estate tax/i], ensure: true },
+  // Non-property taxes & regulatory fees (transient lodging tax, state/county
+  // filings). Deliberately NO fallback: property_tax or utilities would be a
+  // mis-post, so an entity without the account routes to human review instead.
+  // Post-CoA-canon naming is "Taxes – State & Local" (owner, 2026-08-05); the
+  // legacy "Taxes & Licenses" and KP's bare "KP: Tax" still resolve so the key
+  // works on every entity regardless of which rename generation it's on.
+  { key: "expense.taxes_licenses", label: "Taxes and Licenses", classification: "expense", accountType: "Expense", subtype: "TaxesPaid", normalBalance: "debit", match: [/taxes\s*[–—-]\s*state\s*&?\s*local/i, /tax(es)?\s*(&|and)\s*licens/i, /(^|:\s*)tax$/i], ensure: false },
   { key: "expense.other", label: "Other Business Expenses", classification: "expense", accountType: "Expense", subtype: "OtherMiscellaneousServiceCost", normalBalance: "debit", match: [/other business expenses?/i, /other (general|misc)/i], ensure: true },
 ];
 
@@ -210,38 +224,5 @@ export async function ensureCanonicalAccounts(
   return { created, resolved };
 }
 
-/**
- * Booking-channel source string → canonical income key. 6-bucket model
- * (VRBO, then Marriott + Capital One, broken out of
- * Direct): Airbnb, Booking.com, VRBO/HomeAway/Expedia, Marriott (Homes &
- * Villas), and Capital One Travel get their own line; everything else (direct,
- * BE-API, website, whimstay, manual, unresolved codes) rolls into Direct. All
- * six targets are `ensure:true`, so a channel always resolves — a stray source
- * never leaves a payout un-grossable. The income.other def remains for
- * RESOLVING entities that already keep that line; it's not a routing target.
- */
-export function incomeKeyForChannel(source: string | null | undefined): CanonicalKey {
-  const s = (source || "").toLowerCase();
-  if (s.includes("airbnb")) return "income.airbnb";
-  if (s.includes("booking")) return "income.bookingcom";
-  if (s.includes("vrbo") || s.includes("homeaway") || s.includes("expedia")) return "income.vrbo";
-  if (s.includes("marriott") || s.includes("homes & villas") || s.includes("homesvillas")) return "income.marriott";
-  if (s.includes("capital one")) return "income.capitalone";
-  return "income.direct";
-}
-
-/** Owner-statement expense category string → canonical expense key. */
-export function expenseKeyForCategory(category: string | null | undefined): CanonicalKey {
-  const c = (category || "").toLowerCase();
-  if (/manage|mgmt/.test(c)) return "expense.management";
-  if (/clean/.test(c) && !/suppl/.test(c)) return "expense.cleaning";
-  if (/repair|maintenance/.test(c)) return "expense.repairs";
-  if (/hospitality/.test(c)) return "expense.hospitality";
-  if (/suppl|purchase|material/.test(c)) return "expense.supplies";
-  if (/trash|garbage|waste|disposal/.test(c)) return "expense.garbage";
-  if (/insurance/.test(c)) return "expense.insurance";
-  if (/property\s*tax|real estate tax/.test(c)) return "expense.property_tax";
-  return "expense.other";
-}
 
 export { CANONICAL };

@@ -163,10 +163,12 @@ ok(candidateKeys("Quantum Fiber 55").includes("centurylink"), "candidateKeys reb
 {
   const activeRule = mk({ id: "a", predicate: { all: [cond({ field: "merchant", op: "eq", value: "comcast" })] } });
   const proposedRule = mk({ id: "p", predicate: { all: [cond({ field: "merchant", op: "eq", value: "verizon" })] } });
-  const sets = { active: [activeRule], proposed: [proposedRule] };
+  const dismissedRule = mk({ id: "d", predicate: { all: [cond({ field: "merchant", op: "eq", value: "blockbuster" })] } });
+  const sets = { active: [activeRule], proposed: [proposedRule], dismissed: [dismissedRule] };
   eq(coverageFor("comcast", sets), "active", "parity: active rule covers");
   eq(coverageFor("verizon", sets), "proposed", "parity: proposed rule covers");
-  eq(coverageFor("att", sets), "uncovered", "parity: neither → uncovered");
+  eq(coverageFor("blockbuster", sets), "dismissed", "parity: dismissed (archived) rule suppresses re-proposal");
+  eq(coverageFor("att", sets), "uncovered", "parity: none → uncovered");
 }
 
 // ── authorization: rule entity-binding (Finding 1) ──────────────────────────

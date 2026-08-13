@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { profitAndLossByLocation, ledgerStats } from "@/lib/ledger/reports";
 import { Money } from "@/components/money";
+import { PlViewToggle } from "../pl-view-toggle";
 
 export const dynamic = "force-dynamic";
 
@@ -106,6 +107,7 @@ export default async function ByAddressPage({
 
   return (
     <div className="space-y-5">
+      <PlViewToggle entityId={entityId} view="address" />
       <div className="flex flex-wrap items-center gap-1.5">
         <span className="mr-1 text-[11px] font-medium uppercase tracking-[0.06em] text-faint">
           Period

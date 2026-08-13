@@ -556,7 +556,7 @@ export async function revenueByChannel(
   // line memo may just read "Management JE" or "Zelle payment". Reading both
   // means Airbnb income booked via a transfer still counts as Airbnb, and the
   // long-term tenant + reimbursements get their own lines instead of being
-  // dumped into an opaque "Other income". (Single "Sales" accounts
+  // dumped into an opaque "Other income". (3820-style single "Sales" accounts
   // carry no channel in the name, so they fall through to the memo as before.)
   // Entry NAME is included too: Wave/bank-feed deposits carry the channel in
   // the bank descriptor ("ORIG CO NAME:AIRBNB PAYMENTS…"), which the importer
@@ -769,6 +769,7 @@ export interface LedgerEntity {
   id: string;
   realmId: string;
   name: string | null;
+  nickname: string | null;
   legalName: string | null;
   taxType: string | null;
   importedThrough: string | null;
@@ -788,6 +789,7 @@ const entityColumns = {
   id: bkLedgerEntities.id,
   realmId: bkLedgerEntities.realmId,
   name: bkLedgerEntities.name,
+  nickname: bkLedgerEntities.nickname,
   legalName: bkLedgerEntities.legalName,
   taxType: bkLedgerEntities.taxType,
   importedThrough: bkLedgerEntities.importedThrough,
@@ -801,6 +803,133 @@ const entityColumns = {
   ownershipPct: bkLedgerEntities.ownershipPct,
   owners: bkLedgerEntities.owners,
 } as const;
+
+/**
+ * The ownership % for a person's FIRST NAME within an entity's `owners` list,
+ * matched on the first word of each owner's name (case-insensitive). Owner names
+ * are full names whose first word is the person's capital-account first name
+ * (e.g. "Alice Example" → "Alice"), so this drives the Portfolio Comparison
+ * "own share" view without hardcoding anyone. Returns null when the person is
+ * not an owner of the entity (shown as none — NEVER falling back to another
+ * owner). Shared by /ledger and /comparison; unit-tested.
+ */
+/**
+ * One entry on bk_ledger_entities.owners. `prior` records earlier splits
+ * after a buyout/transfer: this owner's pct for transaction dates BEFORE
+ * `until` (entries ascending; the top-level pct applies from the last
+ * `until` onward). Everything else in the app — true-up, holds, rosters —
+ * reads the CURRENT pct and ignores `prior` by design.
+ */
+export interface OwnerRosterEntry {
+  name: string;
+  pct: number;
+  reportingPct?: number;
+  prior?: { until: string; pct: number; reportingPct?: number }[];
+}
+
+const basisPct = (
+  v: { pct: number; reportingPct?: number },
+  basis: "legal" | "reporting"
+): number => (basis === "reporting" ? v.reportingPct ?? v.pct : v.pct);
+
+/** The single roster entry matching a first name — or null (not an owner /
+ * ambiguous). Never guess another owner's slice: the shared invariant. */
+function ownerEntryForFirstName(
+  owners: OwnerRosterEntry[] | null | undefined,
+  firstName: string | null | undefined
+): OwnerRosterEntry | null {
+  const first = firstName?.trim().toLowerCase();
+  if (!first || !owners) return null;
+  const matches = owners.filter(
+    (o) => o.name?.trim().split(/\s+/)[0]?.toLowerCase() === first
+  );
+  return matches.length === 1 ? matches[0] : null;
+}
+
+export function ownerPctForFirstName(
+  owners: OwnerRosterEntry[] | null | undefined,
+  firstName: string | null | undefined,
+  // "legal" (default) = pct: the books/taxes/true-up number. "reporting" = the
+  // owner's economic share (reportingPct ?? pct) for personal views like
+  // /comparison — used when a legal split temporarily parks a partner's stake
+  // with someone else (e.g. a member who can't yet legally hold US real estate).
+  basis: "legal" | "reporting" = "legal"
+): number | null {
+  const me = ownerEntryForFirstName(owners, firstName);
+  return me ? basisPct(me, basis) ?? null : null;
+}
+
+/** The owner's pct on a given date — `prior` entries cover dates before their
+ * `until`; the top-level pct covers everything after the last one. */
+export function ownerPctForFirstNameAsOf(
+  owners: OwnerRosterEntry[] | null | undefined,
+  firstName: string | null | undefined,
+  basis: "legal" | "reporting",
+  dateISO: string
+): number | null {
+  const me = ownerEntryForFirstName(owners, firstName);
+  if (!me) return null;
+  for (const p of me.prior ?? []) if (dateISO < p.until) return basisPct(p, basis);
+  return basisPct(me, basis);
+}
+
+/**
+ * A period split into pct-constant segments for one owner. Usually one
+ * segment; more only when the period spans an ownership change. Null when
+ * the viewer isn't (unambiguously) on the current roster. Pure — the
+ * date-splitting is testable without a database.
+ */
+export function ownerShareSegments(
+  owners: OwnerRosterEntry[] | null | undefined,
+  firstName: string | null | undefined,
+  basis: "legal" | "reporting",
+  start: string,
+  end: string
+): { start: string; end: string; pct: number }[] | null {
+  const me = ownerEntryForFirstName(owners, firstName);
+  if (!me) return null;
+  const cuts = [
+    ...new Set((me.prior ?? []).map((p) => p.until).filter((u) => u > start && u <= end)),
+  ].sort();
+  const bounds = [start, ...cuts];
+  return bounds.map((segStart, i) => ({
+    start: segStart,
+    end: i + 1 < bounds.length ? dayBefore(bounds[i + 1]) : end,
+    pct: ownerPctForFirstNameAsOf(owners, firstName, basis, segStart)!,
+  }));
+}
+
+/**
+ * The signed-in owner's share of an entity's net profit over a period,
+ * honoring dated ownership changes: each segment earns its era's pct.
+ * Costs no extra queries unless the period actually spans a change (the
+ * single-segment case reuses the caller's already-computed total).
+ */
+export async function ownerProfitShareCents(
+  entityId: string,
+  owners: OwnerRosterEntry[] | null | undefined,
+  firstName: string | null | undefined,
+  basis: "legal" | "reporting",
+  period: { start: string; end: string; activity?: string; excludeDepreciation?: boolean },
+  totalNetProfitCents: number
+): Promise<number | null> {
+  const segments = ownerShareSegments(owners, firstName, basis, period.start, period.end);
+  if (!segments) return null;
+  if (segments.length === 1) {
+    return Math.round((totalNetProfitCents * segments[0].pct) / 100);
+  }
+  let share = 0;
+  for (const seg of segments) {
+    const pl = await plSummary(entityId, {
+      start: seg.start,
+      end: seg.end,
+      activity: period.activity,
+      excludeDepreciation: period.excludeDepreciation,
+    });
+    share += Math.round((pl.netProfitCents * seg.pct) / 100);
+  }
+  return share;
+}
 
 export async function listEntities(): Promise<LedgerEntity[]> {
   return db
@@ -943,13 +1072,13 @@ const ASSET_SUBSECTIONS: { label: string; types: string[] }[] = [
 // isn't how a balance sheet reads. Group them into Real estate (land + buildings
 // & improvements, with the related accumulated depreciation nested as a "Less:"
 // contra → net), Furniture, fixtures & equipment, and Other fixed assets (which
-// also holds movable rental units — tiny houses, trailers — that aren't real
+// also holds movable rental units — tiny houses, Airstreams — that aren't real
 // property). Classification is by QBO subtype first, then a generic name
 // heuristic, so it works whether the chart came from QBO (subtypes present) or
 // Wave (subtypes null). When a single address-named building anchors the real-
 // estate class, its land + improvements + depreciation nest under a property-
-// address header (e.g. "123 Main St" → Building / Land / Less: depreciation),
-// matching how imported sub-accounts already nest. Totals are purely display.
+// address header (e.g. "915 SE 29th Ave" → Building / Land / Less: depreciation),
+// matching how QBO sub-accounts already nest 3820. Totals are purely display.
 type FaClass = "real-estate" | "ffe" | "other";
 const FA_CLASS_LABEL: Record<FaClass, string> = {
   "real-estate": "Real estate",
@@ -959,16 +1088,22 @@ const FA_CLASS_LABEL: Record<FaClass, string> = {
 const FA_CLASS_ORDER: FaClass[] = ["real-estate", "ffe", "other"];
 
 // Movable, titled rental units — NOT real property. Land on wheels (tiny houses,
-// trailers, RVs, park models) belongs in Other fixed assets, not real
+// Airstreams, trailers, park models) belongs in Other fixed assets, not real
 // estate. Checked before the building/"house" keywords so "Tiny House" doesn't
 // read as a structure.
 const MOVABLE_UNIT = /tiny ?house|tiny ?home|airstream|\btrailer|\brv\b|park model|yurt|camper|motor ?home|mobile home/;
 
 function isDeprecNode(n: BsNode): boolean {
-  return /AccumulatedDepreciation/i.test(n.accountSubtype ?? "") || /accumulated deprec/i.test(n.name);
+  // Any accumulated-depreciation OR -amortization contra (subtype pattern
+  // covers AccumulatedDepreciation + AccumulatedAmortizationOfOtherAssets;
+  // the name fallback covers subtype-less Wave charts).
+  return (
+    /Accumulated(Depreciation|Amortization)/i.test(n.accountSubtype ?? "") ||
+    /accumulated (deprec|amort)/i.test(n.name)
+  );
 }
 function isAddressLike(name: string): boolean {
-  return /^\s*\d+\s+\S/.test(name); // "123 Main St", "45 Oak Ave"
+  return /^\s*\d+\s+\S/.test(name); // "915 SE 29th Ave", "3820 SE Belmont"
 }
 
 /** Classify a fixed-asset root into a presentation class. */
@@ -1691,44 +1826,6 @@ export async function ledgerStats(entityId: string): Promise<{
   };
 }
 
-export interface AnnualPnlRow {
-  year: number;
-  revenueCents: number;
-  expenseCents: number;
-  netIncomeCents: number;
-}
-
-/** Income / expenses / net income for each year (descending). */
-export async function annualPnl(
-  entityId: string,
-  years: number[]
-): Promise<AnnualPnlRow[]> {
-  const out: AnnualPnlRow[] = [];
-  for (const y of years) {
-    const pl = await profitAndLoss(entityId, {
-      start: `${y}-01-01`,
-      end: `${y}-12-31`,
-    });
-    out.push({
-      year: y,
-      revenueCents: pl.totalRevenueCents,
-      expenseCents: pl.totalExpenseCents,
-      netIncomeCents: pl.netIncomeCents,
-    });
-  }
-  return out;
-}
-
-/** Single-account net balance (debit − credit cents) as of a date. */
-export async function accountNetCents(
-  entityId: string,
-  qboAccountId: string,
-  opts: { start?: string; end?: string } = {}
-): Promise<number> {
-  const bals = await accountBalances(entityId, opts);
-  return bals.find((b) => b.qboAccountId === qboAccountId)?.netCents ?? 0;
-}
-
 export interface AnnualOperatingRow {
   year: number;
   revenueCents: number;
@@ -1754,58 +1851,61 @@ export async function annualOperating(
   years: number[],
   opts: { activity?: string } = {}
 ): Promise<AnnualOperatingRow[]> {
-  const out: AnnualOperatingRow[] = [];
-  for (const y of years) {
-    let bals = await accountBalances(entityId, {
-      start: `${y}-01-01`,
-      end: `${y}-12-31`,
-    });
-    if (opts.activity) {
-      bals = bals.filter((b) => b.activity === opts.activity);
-    }
-    let revenueCents = 0;
-    let otherIncomeCents = 0;
-    let operatingExpenseCents = 0;
-    let mortgageInterestCents = 0;
-    let depreciationCents = 0;
-    let belowLineOtherCents = 0;
-    for (const b of bals) {
-      if (b.classification === "revenue") {
-        if (b.accountType === "Other Income") otherIncomeCents += -b.netCents;
-        else revenueCents += -b.netCents;
-      } else if (b.classification === "expense") {
-        const amt = b.netCents; // debit-normal positive
-        // Use the SAME below-the-line classifier as the P&L so the two views
-        // agree. Routing only by subtype (the old behavior) left one-time and
-        // "Other Expense"-type items — e.g. a §481(a) catch-up adjustment — in
-        // operating expense, which could swing a year's NOI deeply negative.
-        const bucket = belowLineBucket(b);
-        if (bucket === "interest") mortgageInterestCents += amt;
-        else if (bucket === "depreciation" || bucket === "amortization")
-          depreciationCents += amt;
-        else if (bucket) belowLineOtherCents += amt; // one-time, non-operating
-        else operatingExpenseCents += amt;
+  // Each year is independent, so fetch them CONCURRENTLY rather than one query
+  // per year in series — this is the dominant cost of the entity overview. The
+  // per-year math and output order are unchanged (years.map preserves order).
+  return Promise.all(
+    years.map(async (y): Promise<AnnualOperatingRow> => {
+      let bals = await accountBalances(entityId, {
+        start: `${y}-01-01`,
+        end: `${y}-12-31`,
+      });
+      if (opts.activity) {
+        bals = bals.filter((b) => b.activity === opts.activity);
       }
-    }
-    const noiCents = revenueCents - operatingExpenseCents;
-    out.push({
-      year: y,
-      revenueCents,
-      operatingExpenseCents,
-      noiCents,
-      otherIncomeCents,
-      mortgageInterestCents,
-      depreciationCents,
-      belowLineOtherCents,
-      netIncomeCents:
-        noiCents +
-        otherIncomeCents -
-        mortgageInterestCents -
-        depreciationCents -
+      let revenueCents = 0;
+      let otherIncomeCents = 0;
+      let operatingExpenseCents = 0;
+      let mortgageInterestCents = 0;
+      let depreciationCents = 0;
+      let belowLineOtherCents = 0;
+      for (const b of bals) {
+        if (b.classification === "revenue") {
+          if (b.accountType === "Other Income") otherIncomeCents += -b.netCents;
+          else revenueCents += -b.netCents;
+        } else if (b.classification === "expense") {
+          const amt = b.netCents; // debit-normal positive
+          // Use the SAME below-the-line classifier as the P&L so the two views
+          // agree. Routing only by subtype (the old behavior) left one-time and
+          // "Other Expense"-type items — e.g. a §481(a) catch-up adjustment — in
+          // operating expense, which could swing a year's NOI deeply negative.
+          const bucket = belowLineBucket(b);
+          if (bucket === "interest") mortgageInterestCents += amt;
+          else if (bucket === "depreciation" || bucket === "amortization")
+            depreciationCents += amt;
+          else if (bucket) belowLineOtherCents += amt; // one-time, non-operating
+          else operatingExpenseCents += amt;
+        }
+      }
+      const noiCents = revenueCents - operatingExpenseCents;
+      return {
+        year: y,
+        revenueCents,
+        operatingExpenseCents,
+        noiCents,
+        otherIncomeCents,
+        mortgageInterestCents,
+        depreciationCents,
         belowLineOtherCents,
-    });
-  }
-  return out;
+        netIncomeCents:
+          noiCents +
+          otherIncomeCents -
+          mortgageInterestCents -
+          depreciationCents -
+          belowLineOtherCents,
+      };
+    })
+  );
 }
 
 /** Lightweight P&L summary for a single entity + date range + optional activity. */
@@ -2159,9 +2259,12 @@ export async function capitalStructure(
   entityId: string,
   asOf: string
 ): Promise<CapitalStructure> {
-  const [bals, capEvents] = await Promise.all([
+  // All three are independent — run concurrently instead of fetching net income
+  // in a second round-trip after the first two.
+  const [bals, capEvents, netIncomeToDateCents] = await Promise.all([
     accountBalances(entityId, { end: asOf }),
     capitalEvents(entityId, asOf),
+    netIncomeCents(entityId, { end: asOf }),
   ]);
   let totalLiabilitiesCents = 0;
   let mortgageDebtCents = 0;
@@ -2182,7 +2285,6 @@ export async function capitalStructure(
   // contributed capital.
   const contributedCapitalCents = capEvents.totalContributedCents;
   const distributionsCents = capEvents.totalDistributionsCents;
-  const netIncomeToDateCents = await netIncomeCents(entityId, { end: asOf });
   return {
     asOf,
     totalLiabilitiesCents,

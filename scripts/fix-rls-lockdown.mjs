@@ -1,7 +1,7 @@
 /**
  * SECURITY FIX — lock down every public table to the service role only.
  *
- * Findings (verified via scripts/rls-audit.mjs against project your-project-ref):
+ * Findings (verified via scripts/rls-audit.mjs against the production project):
  * 20 of 23 public tables had RLS DISABLED while the internet-facing anon /
  * authenticated PostgREST roles held full DML grants — i.e. anyone with the
  * project's public anon key could read AND write all bookkeeping, Plaid, user,

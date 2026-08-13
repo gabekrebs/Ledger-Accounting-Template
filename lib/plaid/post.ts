@@ -47,6 +47,12 @@ export async function postPlaidTransaction(
     if (txn.status !== "pending_review") {
       throw new Error(`already ${txn.status}`);
     }
+    // Bank-PENDING transactions must NEVER hit the immutable journal — they
+    // can still change amount or be cancelled. The sync no longer stores them
+    // at all; this refusal is the backstop for any legacy straggler.
+    if (txn.pending) {
+      throw new Error("bank-pending transactions are never posted; the settled transaction arrives on its own");
+    }
     // A txn only has an entity once its account is assigned to a business.
     if (!txn.entityId) {
       throw new Error(
@@ -203,6 +209,8 @@ export async function postPlaidTransactionSplit(
       .for("update");
     if (!txn) throw new Error("transaction not found");
     if (txn.status !== "pending_review") throw new Error(`already ${txn.status}`);
+    // Never post a bank-PENDING row — never stored by the sync; backstop only.
+    if (txn.pending) throw new Error("bank-pending transactions are never posted; the settled transaction arrives on its own");
     if (!txn.entityId) {
       throw new Error(
         "assign this bank account to an entity (Bank connections) before posting"
@@ -351,6 +359,8 @@ export async function postPlaidTransactionEntry(
       .for("update");
     if (!txn) throw new Error("transaction not found");
     if (txn.status !== "pending_review") throw new Error(`already ${txn.status}`);
+    // Never post a bank-PENDING row — never stored by the sync; backstop only.
+    if (txn.pending) throw new Error("bank-pending transactions are never posted; the settled transaction arrives on its own");
     if (!txn.entityId) {
       throw new Error(
         "assign this bank account to an entity (Bank connections) before posting"
@@ -512,9 +522,10 @@ export async function unpostPlaidTransaction(plaidTxnRowId: string) {
  */
 export async function linkTransferCounterpart(
   counterpartTxnId: string,
-  journalEntryId: string
+  journalEntryId: string,
+  exec: DbOrTx = db
 ) {
-  await db
+  await exec
     .update(bkPlaidTransactions)
     .set({ status: "ignored", journalEntryId, updatedAt: new Date() })
     .where(

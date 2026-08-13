@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { syncEntityTransactions, syncAllItems } from "@/lib/plaid/sync";
-import { canAccessEntity, currentUserIsAdmin } from "@/lib/ledger/access";
-import { getCurrentUser } from "@/lib/supabase/auth-server";
+import { safePlaidError } from "@/lib/plaid/client";
+import { currentUserIsOwner } from "@/lib/ledger/access";
+import { limitRoute } from "@/lib/security/rate-limit";
+import { actionIdentity } from "@/lib/security/rate-limit-identity";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -12,21 +14,21 @@ export const maxDuration = 120;
  *
  * With entityId → sync the connections holding any account assigned to that
  * entity (the per-entity Bank tab). Without → sync every connection (the global
- * Bank connections "Sync now"). The nightly ledger cron can call syncAllItems()
- * directly once we trust the feed.
+ * Bank connections "Sync now").
+ *
+ * OWNER-ONLY either way: manual sync is a system operation against shared bank
+ * connections (Plaid API cost, cross-entity side effects), not bookkeeping —
+ * accountants and partners review/categorize but never trigger the feed. The
+ * webhook + daily cron keep data fresh without anyone clicking.
  */
 export async function POST(request: NextRequest) {
   const body = await request.json().catch(() => ({}));
   const entityId: string | undefined = body?.entityId;
-  // Per-entity sync: must have access to that entity. Global sync: admin only.
-  if (entityId) {
-    const user = await getCurrentUser();
-    if (!(await canAccessEntity(user?.email, entityId))) {
-      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-    }
-  } else if (!(await currentUserIsAdmin())) {
+  if (!(await currentUserIsOwner())) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
+  const limited = await limitRoute("manualSync", await actionIdentity());
+  if (limited) return limited;
   try {
     const results = entityId
       ? await syncEntityTransactions(entityId)
@@ -41,7 +43,9 @@ export async function POST(request: NextRequest) {
     );
     return NextResponse.json({ ok: true, items: results.length, totals });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    // Redacted summary only — a raw Plaid AxiosError carries the API secret.
+    const message = safePlaidError(err);
+    console.error("plaid/sync:", message);
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { db, schema } from "@/lib/db/client";
 import {
   listPendingTransactions,
@@ -13,27 +13,48 @@ import {
   type MerchantHistory,
   type TargetAccount,
 } from "@/lib/plaid/auto-categorize";
+import { normalizeMerchant } from "@/lib/ledger/merchant";
+import {
+  buildPrecedents,
+  similarFor,
+  correctionsFor,
+  type Precedent,
+} from "@/lib/ai/similar";
+import { readIntel } from "@/lib/ai/merchant-intel";
+import {
+  bucketKeyFor,
+  recordSuggestionEvent,
+  AI_AUTOPOST_MAX_CENTS,
+  AI_AUTOPOST_MIN_CONFIDENCE,
+  SUGGEST_MODEL,
+} from "@/lib/ai/events";
+import { readBucketStats, calibratedDisplay } from "@/lib/ai/calibration";
+import { usdPlain } from "@/lib/ledger/format";
 
 /**
- * Phase 2 — category SUGGESTIONS for the transactions Phase 1 couldn't auto-post.
+ * Phase 2 — category SUGGESTIONS for the transactions Phase 1 couldn't auto-post
+ * (ADR-021: the Opus evidence pipeline).
  *
  * Cost discipline, in order:
  *   1. FREE history pre-pass — any merchant with a strong (≥80%, ≥2-sample) but
  *      not-quite-auto-postable precedent is resolved here with NO model call.
- *   2. Haiku 4.5 — only the genuinely-unknown leftovers go to the model, one
- *      call per entity, structured output, chart-of-accounts cached as a stable
- *      prefix. Haiku because once history narrows the field this is easy work;
- *      reserve Opus for the account-matcher's harder multi-signal problem.
+ *   2. Opus 4.8 for the genuinely-unknown leftovers — after rules + history
+ *      absorb the volume, what reaches the model is a small, HARD tail, so it
+ *      gets the best judgment available: adaptive thinking, the entity's chart
+ *      (cached prompt prefix), up to 8 SIMILAR PRIOR BOOKINGS retrieved from
+ *      this entity's ledger, recorded owner CORRECTIONS as counter-examples,
+ *      and the cached MERCHANT INTEL profile. One call per entity, structured
+ *      output.
  *
- * Nothing here writes — these only PRE-FILL the review dropdowns; a human still
- * clicks Post. Every returned account_id is validated against the entity's real
- * active chart, so a hallucinated id is dropped rather than shown.
- *
- * The prompt-building is factored into `prepareCategorization` so the Phase 3
- * threshold batch can submit the identical request shape to the Batch API.
+ * Nothing here writes to the journal — suggestions only PRE-FILL the review UI
+ * (and feed the separately-gated auto-post buckets). Every returned account_id
+ * is validated against the entity's real active chart. Every suggestion is
+ * recorded to the evidence ledger with its full evidence snapshot, so observed
+ * precision (lib/ai/calibration.ts) — not the model's self-reported number —
+ * is what the UI ultimately trusts.
  */
 
-const MODEL = "claude-haiku-4-5";
+const MODEL = SUGGEST_MODEL;
 
 // History counts as a confident SUGGESTION (not an auto-post) at a softer bar
 // than the auto-post gate — it only pre-fills a box a human confirms.
@@ -44,9 +65,11 @@ export interface CategorySuggestion {
   txnId: string;
   accountId: string;
   accountLabel: string;
-  confidence: number; // 0..1
+  confidence: number; // raw 0..1 (history agreement, or model self-report)
   reasoning: string;
   source: "history" | "ai";
+  /** AI-cleaned vendor name for the books; null = keep the descriptor */
+  suggestedPayee: string | null;
 }
 export interface SuggestCategoriesResult {
   suggestions: CategorySuggestion[];
@@ -56,10 +79,7 @@ export interface SuggestCategoriesResult {
 type PendingTxn = Awaited<ReturnType<typeof listPendingTransactions>>[number];
 type PostableAccount = Awaited<ReturnType<typeof listPostableAccounts>>[number];
 
-const acctLabel = (a: PostableAccount) =>
-  a.fullyQualifiedName ?? a.name ?? "";
-const usd = (cents: number) =>
-  (cents / 100).toLocaleString("en-US", { style: "currency", currency: "USD" });
+const acctLabel = (a: PostableAccount) => a.fullyQualifiedName ?? a.name ?? "";
 
 // Structured-output schema: object, all props required, additionalProperties
 // false, nullable via type arrays, no min/max/length (per the structured-output
@@ -88,8 +108,21 @@ const SCHEMA = {
             type: "string",
             description: "One short human-readable sentence.",
           },
+          suggested_payee: {
+            type: ["string", "null"],
+            description:
+              "A clean, short vendor name as it should appear in the books " +
+              "(e.g. 'Home Depot', 'NW Natural'). Null when the descriptor is " +
+              "already clean or you cannot tell who the vendor is.",
+          },
         },
-        required: ["txn_id", "account_id", "confidence", "reasoning"],
+        required: [
+          "txn_id",
+          "account_id",
+          "confidence",
+          "reasoning",
+          "suggested_payee",
+        ],
       },
     },
   },
@@ -97,36 +130,61 @@ const SCHEMA = {
 } as const;
 
 const SYSTEM_INSTRUCTIONS =
-  "You are a bookkeeper categorizing bank transactions into a business's chart " +
-  "of accounts. For each transaction you are given the merchant, the bank's own " +
-  "category guess, the amount, and whether it is money OUT (an expense/payment) " +
-  "or money IN (income/refund/deposit). When a transaction includes a " +
-  "'previously booked' hint, that precedent is the STRONGEST signal — follow it " +
-  "unless the amount or direction makes it impossible. Pick account_id ONLY from " +
-  "the provided chart and copy it VERBATIM; never invent an id. Choose an " +
-  "expense account for money-out and an income account for money-in. Set " +
-  "account_id to null when you genuinely cannot tell — a missing suggestion is " +
-  "better than a wrong one. Calibrate confidence honestly: ~0.9+ when a " +
-  "precedent or the merchant makes it obvious, lower when you are guessing from " +
-  "the merchant name alone.";
+  "You are the bookkeeper for a portfolio of small real-estate LLCs, " +
+  "categorizing bank transactions into one entity's chart of accounts. For " +
+  "each transaction you get the merchant, the bank's category guess, the " +
+  "amount and direction (money OUT = expense/payment, money IN = " +
+  "income/refund/deposit) — and, when available, the owner's own precedent: " +
+  "SIMILAR PRIOR BOOKINGS from this entity's ledger, CORRECTIONS he made to " +
+  "past suggestions, an aggregate 'previously booked' hint, and a MERCHANT " +
+  "INTEL profile. Follow the owner's demonstrated pattern over your general " +
+  "knowledge: prior bookings and corrections outrank the bank's guess and the " +
+  "intel profile. Amount matters — a $30 hardware-store run and a $7,800 one " +
+  "are usually different categories; weigh the similar bookings closest in " +
+  "amount most heavily. Pick account_id ONLY from the chart, copied VERBATIM. " +
+  "Choose an expense account for money-out and an income account for " +
+  "money-in. Set account_id to null when you genuinely cannot tell. Also " +
+  "return suggested_payee: the clean vendor name the books should carry. " +
+  "Calibrate confidence honestly — ~0.9+ only when precedent or the merchant " +
+  "makes it obvious; your confidence is measured against outcomes and " +
+  "miscalibration gets the whole pipeline locked out of automation.";
 
 /** The chart the model picks from — stable bytes, good for the prompt cache. */
 function chartBlock(accounts: PostableAccount[]): string {
-  const lines = accounts
-    .filter((a) => a.classification === "Expense" || a.classification === "Revenue" || a.classification === "Income" || a.accountType)
-    .map(
-      (a) =>
-        `  - ${acctLabel(a)}  [${a.classification ?? a.accountType ?? "?"}] ` +
-        `[account_id: ${a.id}]`
-    );
+  const lines = accounts.map(
+    (a) =>
+      `  - ${acctLabel(a)}  [${a.classification ?? a.accountType ?? "?"}] ` +
+      `[account_id: ${a.id}]`
+  );
   return (
     "CHART OF ACCOUNTS — categories you may pick (copy account_id verbatim):\n\n" +
     lines.join("\n")
   );
 }
 
-/** The volatile per-transaction block, including any softer history hint. */
-function txnBlock(txns: PendingTxn[], history: MerchantHistory, accountLabelById: Map<string, string>): string {
+/** Everything retrieved for one txn's prompt — also the evidence snapshot. */
+export interface TxnEvidence {
+  rawName: string;
+  merchantKey: string;
+  merchantSeen: boolean;
+  similar: { payee: string; amountCents: number; txnDate: string; accountLabel: string }[];
+  corrections: { suggestedLabel: string; postedLabel: string }[];
+  intel: {
+    displayName: string | null;
+    businessType: string | null;
+    likelyCategory: string | null;
+    ownerCategory: string | null;
+  } | null;
+  historyHint: { accountLabel: string; agreement: number; samples: number } | null;
+}
+
+/** The volatile per-transaction block: txn facts + retrieved evidence. */
+function txnBlock(
+  txns: PendingTxn[],
+  evidenceByTxn: Map<string, TxnEvidence>,
+  history: MerchantHistory,
+  accountLabelById: Map<string, string>
+): string {
   const blocks = txns.map((t) => {
     const merchant = t.merchantName ?? t.name ?? "(unknown)";
     const out = t.amountCents > 0;
@@ -136,9 +194,38 @@ function txnBlock(txns: PendingTxn[], history: MerchantHistory, accountLabelById
       `[txn_id: ${t.id}]`,
       `  Merchant: ${merchant}`,
       `  Bank category guess: ${plaidCat ?? "(none)"}`,
-      `  Amount: ${usd(Math.abs(t.amountCents))} (${out ? "money OUT" : "money IN"})`,
+      `  Amount: ${usdPlain(Math.abs(t.amountCents))} (${out ? "money OUT" : "money IN"})`,
       `  Date: ${String(t.txnDate).slice(0, 10)}`,
     ];
+    const ev = evidenceByTxn.get(t.id);
+    if (ev?.similar.length) {
+      lines.push(`  Similar prior bookings (this entity):`);
+      for (const s of ev.similar) {
+        lines.push(
+          `    - "${s.payee}" ${usdPlain(s.amountCents)} on ${s.txnDate} → ${s.accountLabel}`
+        );
+      }
+    }
+    if (ev?.corrections.length) {
+      lines.push(`  Corrections the owner made on this merchant:`);
+      for (const c of ev.corrections) {
+        lines.push(
+          `    - a past suggestion of "${c.suggestedLabel}" was corrected to "${c.postedLabel}"`
+        );
+      }
+    }
+    if (ev?.intel && (ev.intel.businessType || ev.intel.likelyCategory)) {
+      lines.push(
+        `  Merchant intel: ${ev.intel.displayName ?? merchant} — ` +
+          `${ev.intel.businessType ?? "unknown type"}` +
+          (ev.intel.likelyCategory
+            ? `; typically "${ev.intel.likelyCategory}"`
+            : "") +
+          (ev.intel.ownerCategory
+            ? ` (the owner books this to "${ev.intel.ownerCategory}")`
+            : "")
+      );
+    }
     const v = historyVerdict(history, t.merchantName, t.name);
     if (v) {
       lines.push(
@@ -160,24 +247,76 @@ function getClient(): Anthropic | null {
 }
 
 /**
+ * Retrieval for a set of txns: similar bookings, corrections, and intel, plus
+ * whether the merchant has been seen in this entity's books at all (the
+ * seen/new axis of the calibration bucket).
+ */
+async function buildEvidence(
+  entityId: string,
+  txns: PendingTxn[],
+  precedents: Precedent[]
+): Promise<Map<string, TxnEvidence>> {
+  const keys = txns.map((t) => normalizeMerchant(t.merchantName ?? t.name));
+  const [correctionMap, intelMap] = await Promise.all([
+    correctionsFor(entityId, keys),
+    readIntel(keys),
+  ]);
+  const knownKeys = new Set(precedents.map((p) => p.merchantKey));
+
+  const out = new Map<string, TxnEvidence>();
+  txns.forEach((t, i) => {
+    const merchantKey = keys[i];
+    const similar = similarFor(t, precedents);
+    const intel = intelMap.get(merchantKey) ?? null;
+    out.set(t.id, {
+      rawName: t.merchantName ?? t.name ?? "",
+      merchantKey,
+      merchantSeen: knownKeys.has(merchantKey) || similar.length > 0,
+      similar: similar.map((s) => ({
+        payee: s.payee,
+        amountCents: s.amountCents,
+        txnDate: s.txnDate,
+        accountLabel: s.accountLabel,
+      })),
+      corrections: (correctionMap.get(merchantKey) ?? []).map((c) => ({
+        suggestedLabel: c.suggestedLabel,
+        postedLabel: c.postedLabel,
+      })),
+      intel: intel
+        ? {
+            displayName: intel.displayName,
+            businessType: intel.businessType,
+            likelyCategory: intel.likelyCategory,
+            ownerCategory: intel.ownerCategory,
+          }
+        : null,
+      historyHint: null, // filled by prepareCategorization when a verdict exists
+    });
+  });
+  return out;
+}
+
+/**
  * Build everything needed to categorize one entity: the free history-resolved
  * suggestions, plus the exact model-request pieces for the AI leftovers. Shared
  * by the interactive path (below) and the Phase 3 batch submitter.
  */
 export async function prepareCategorization(entityId: string) {
-  const [pending, postable] = await Promise.all([
+  const [pendingAll, postable] = await Promise.all([
     listPendingTransactions(entityId),
     listPostableAccounts(entityId),
   ]);
+  // Bank-PENDING rows are outside the accounting workflow entirely — never
+  // suggest (or spend AI budget) on a transaction that can still change or
+  // vanish. New syncs don't store them; this guards any legacy stragglers.
+  const pending = pendingAll.filter((t) => !t.pending);
   const history = await buildMerchantHistory(entityId);
 
   const accountLabelById = new Map(postable.map((a) => [a.id, acctLabel(a)]));
   const validIds = new Set(postable.map((a) => a.id));
 
   // Cross-ledger fallback for merchants this entity has never seen — built
-  // lazily, only when some pending row actually lacks local precedent. The
-  // suggest path uses the same softer bar as local history; it still only
-  // pre-fills a dropdown a human confirms.
+  // lazily, only when some pending row actually lacks local precedent.
   let portfolio: Awaited<ReturnType<typeof buildPortfolioMerchantHistory>> | null =
     null;
   const targets: TargetAccount[] = postable.map((a) => ({
@@ -218,18 +357,28 @@ export async function prepareCategorization(entityId: string) {
         confidence: v.agreement,
         reasoning: `Booked ${where} ${Math.round(v.agreement * 100)}% of ${v.samples} prior times`,
         source: "history",
+        suggestedPayee: null,
       });
     } else {
       aiTxns.push(t);
     }
   }
 
+  // Retrieval for the AI leftovers only (the whole point of the Opus call).
+  const precedents = aiTxns.length ? await buildPrecedents(entityId) : [];
+  const evidenceByTxn = aiTxns.length
+    ? await buildEvidence(entityId, aiTxns, precedents)
+    : new Map<string, TxnEvidence>();
+
   const requestParams =
     aiTxns.length === 0
       ? null
       : ({
           model: MODEL,
-          max_tokens: 8192,
+          max_tokens: 16000,
+          // Adaptive thinking is NOT on by default on Opus 4.8 — enable it;
+          // disambiguating precedent genuinely benefits from a beat of thought.
+          thinking: { type: "adaptive" },
           system: [
             { type: "text", text: SYSTEM_INSTRUCTIONS },
             {
@@ -242,7 +391,7 @@ export async function prepareCategorization(entityId: string) {
             {
               role: "user",
               content:
-                txnBlock(aiTxns, history, accountLabelById) +
+                txnBlock(aiTxns, evidenceByTxn, history, accountLabelById) +
                 "\n\nCategorize each transaction.",
             },
           ],
@@ -257,6 +406,7 @@ export async function prepareCategorization(entityId: string) {
     requestParams,
     accountLabelById,
     validIds,
+    evidenceByTxn,
   };
 }
 
@@ -265,6 +415,7 @@ interface RawSuggestion {
   account_id?: unknown;
   confidence?: unknown;
   reasoning?: unknown;
+  suggested_payee?: unknown;
 }
 
 /** Validate model output against the real chart + the asked txns. */
@@ -283,6 +434,10 @@ export function validateAiSuggestions(
     if (!askedTxnIds.has(txnId) || seen.has(txnId)) continue;
     if (!validIds.has(accountId)) continue;
     seen.add(txnId);
+    const payee =
+      typeof r.suggested_payee === "string" && r.suggested_payee.trim()
+        ? r.suggested_payee.trim().slice(0, 120)
+        : null;
     out.push({
       txnId,
       accountId,
@@ -293,13 +448,14 @@ export function validateAiSuggestions(
           : 0,
       reasoning: typeof r.reasoning === "string" ? r.reasoning.slice(0, 300) : "",
       source: "ai",
+      suggestedPayee: payee,
     });
   }
   return out;
 }
 
 /**
- * Interactive entry point: history pre-pass + one synchronous Haiku call for the
+ * Interactive entry point: history pre-pass + one synchronous Opus call for the
  * leftovers. Returns combined, validated, highest-confidence-first suggestions.
  */
 export async function suggestCategories(
@@ -342,6 +498,7 @@ export async function suggestCategories(
     } catch (e) {
       console.error("suggest-categories: model call threw:", e);
       // Degrade to history-only rather than failing the whole screen.
+      await persistSuggestions(entityId, suggestions, prep.evidenceByTxn);
       return {
         suggestions,
         error: "AI suggestions failed — history-only; categorize the rest manually.",
@@ -351,7 +508,7 @@ export async function suggestCategories(
 
   // Persist so the suggestions survive navigation and the review page can
   // pre-fill on load (the same store the batch path writes to).
-  await persistSuggestions(suggestions);
+  await persistSuggestions(entityId, suggestions, prep.evidenceByTxn);
 
   suggestions.sort((x, y) => y.confidence - x.confidence);
   return { suggestions, error: null };
@@ -359,14 +516,52 @@ export async function suggestCategories(
 
 /**
  * Write suggestions onto their transactions — ONLY rows still `pending_review`
- * (a posted/ignored txn must never gain a stale suggestion). Idempotent: re-
- * running overwrites with the latest. Returns the number of rows written.
+ * (a posted/ignored txn must never gain a stale suggestion) — and record each
+ * one to the evidence ledger with its bucket + evidence snapshot. Idempotent:
+ * re-running overwrites the txn columns, and the event recorder dedupes
+ * re-shown identical suggestions.
+ *
+ * `evidenceByTxn` is optional: the interactive path passes the exact evidence
+ * the prompt used; the batch-ingest path (results arrive hours later) rebuilds
+ * a minimal snapshot from the txn row instead.
  */
 export async function persistSuggestions(
-  suggestions: CategorySuggestion[]
+  entityId: string,
+  suggestions: CategorySuggestion[],
+  evidenceByTxn?: Map<string, TxnEvidence>
 ): Promise<number> {
+  if (!suggestions.length) return 0;
+
+  // Txn facts for bucket + event fields (merchant key, amount).
+  const txnRows = await db
+    .select({
+      id: schema.bkPlaidTransactions.id,
+      merchantName: schema.bkPlaidTransactions.merchantName,
+      name: schema.bkPlaidTransactions.name,
+      amountCents: schema.bkPlaidTransactions.amountCents,
+      plaidCategory: schema.bkPlaidTransactions.plaidCategory,
+    })
+    .from(schema.bkPlaidTransactions)
+    .where(
+      inArray(
+        schema.bkPlaidTransactions.id,
+        suggestions.map((s) => s.txnId)
+      )
+    );
+  const txnById = new Map(txnRows.map((t) => [t.id, t]));
+
   let written = 0;
   for (const s of suggestions) {
+    const t = txnById.get(s.txnId);
+    if (!t) continue;
+    const ev = evidenceByTxn?.get(s.txnId) ?? null;
+    const merchantKey = ev?.merchantKey ?? normalizeMerchant(t.merchantName ?? t.name);
+    // History suggestions are precedent by definition → seen. For AI, use the
+    // evidence's answer; a batch-ingested row without evidence is conservative
+    // (new) so it can only land in a non-auto-postable bucket.
+    const merchantSeen = s.source === "history" ? true : (ev?.merchantSeen ?? false);
+    const bucketKey = bucketKeyFor(s.source, merchantSeen, s.confidence);
+
     const res = await db
       .update(schema.bkPlaidTransactions)
       .set({
@@ -375,6 +570,8 @@ export async function persistSuggestions(
         suggestedReasoning: s.reasoning,
         suggestionSource: s.source,
         suggestedAt: new Date(),
+        suggestedPayee: s.suggestedPayee,
+        suggestionBucket: bucketKey,
         updatedAt: new Date(),
       })
       .where(
@@ -384,7 +581,40 @@ export async function persistSuggestions(
         )
       )
       .returning({ id: schema.bkPlaidTransactions.id });
+    if (!res.length) continue;
     written += res.length;
+
+    // Evidence ledger — the row calibration measures. Never let a logging
+    // failure break the suggestion write.
+    try {
+      await recordSuggestionEvent({
+        entityId,
+        txnId: s.txnId,
+        merchantKey,
+        amountCents: Number(t.amountCents),
+        source: s.source,
+        suggestedAccountId: s.accountId,
+        suggestedPayee: s.suggestedPayee,
+        confidence: s.confidence,
+        bucketKey,
+        reason: s.reasoning,
+        evidence: ev ?? {
+          rawName: t.merchantName ?? t.name ?? "",
+          merchantKey,
+          batchIngested: true,
+          plaidCategory:
+            (t.plaidCategory as { primary?: string } | null)?.primary ?? null,
+        },
+        model: s.source === "ai" ? MODEL : null,
+        wouldAutoPost:
+          s.source === "ai" &&
+          merchantSeen &&
+          s.confidence >= AI_AUTOPOST_MIN_CONFIDENCE &&
+          Math.abs(Number(t.amountCents)) <= AI_AUTOPOST_MAX_CENTS,
+      });
+    } catch (e) {
+      console.error(`suggest-categories: event record failed for ${s.txnId}:`, e);
+    }
   }
   return written;
 }
@@ -395,11 +625,18 @@ export interface PersistedSuggestion {
   confidence: number;
   reasoning: string;
   source: "history" | "ai";
+  suggestedPayee: string | null;
+  bucketKey: string | null;
+  /** true when `confidence` is the bucket's MEASURED precision */
+  calibrated: boolean;
 }
 
 /**
  * Read the persisted suggestions for an entity's still-pending transactions, so
  * the review page can pre-fill dropdowns on load without a fresh model call.
+ * The confidence returned is the CALIBRATED display value: the bucket's
+ * measured precision once it has ≥30 outcomes, else the raw number (the UI
+ * tags those "unproven").
  */
 export async function readPersistedSuggestions(
   entityId: string
@@ -411,6 +648,8 @@ export async function readPersistedSuggestions(
       confidence: schema.bkPlaidTransactions.suggestedConfidence,
       reasoning: schema.bkPlaidTransactions.suggestedReasoning,
       source: schema.bkPlaidTransactions.suggestionSource,
+      suggestedPayee: schema.bkPlaidTransactions.suggestedPayee,
+      bucketKey: schema.bkPlaidTransactions.suggestionBucket,
     })
     .from(schema.bkPlaidTransactions)
     .where(
@@ -419,15 +658,28 @@ export async function readPersistedSuggestions(
         eq(schema.bkPlaidTransactions.status, "pending_review")
       )
     );
+
+  const stats = await readBucketStats(
+    rows.map((r) => r.bucketKey).filter((b): b is string => !!b)
+  );
+
   const out = new Map<string, PersistedSuggestion>();
   for (const r of rows) {
     if (!r.accountId) continue;
+    const raw = r.confidence ?? 0;
+    const disp = calibratedDisplay(
+      raw,
+      r.bucketKey ? stats.get(r.bucketKey) : undefined
+    );
     out.set(r.txnId, {
       txnId: r.txnId,
       accountId: r.accountId,
-      confidence: r.confidence ?? 0,
+      confidence: disp.confidence,
       reasoning: r.reasoning ?? "",
       source: r.source === "ai" ? "ai" : "history",
+      suggestedPayee: r.suggestedPayee ?? null,
+      bucketKey: r.bucketKey ?? null,
+      calibrated: disp.calibrated,
     });
   }
   return out;

@@ -3,7 +3,9 @@
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { upsertLoan, deleteLoan, type LoanInput } from "@/lib/ledger/loans";
-import { assertEntityAccess } from "@/lib/ledger/access";
+import { assertEntityWrite } from "@/lib/ledger/access";
+import { logAudit } from "@/lib/ledger/audit";
+import { str, floatOrNull } from "@/lib/ledger/forms";
 
 function toCents(v: FormDataEntryValue | null): number | null {
   const s = String(v ?? "").trim().replace(/[$,]/g, "");
@@ -14,20 +16,10 @@ function toCents(v: FormDataEntryValue | null): number | null {
 function toCentsRequired(v: FormDataEntryValue | null): number {
   return toCents(v) ?? 0;
 }
-function str(v: FormDataEntryValue | null): string | null {
-  const s = String(v ?? "").trim();
-  return s.length ? s : null;
-}
-function floatOrNull(v: FormDataEntryValue | null): number | null {
-  const s = String(v ?? "").trim();
-  if (!s) return null;
-  const n = parseFloat(s);
-  return Number.isFinite(n) ? n : null;
-}
 
 export async function saveLoan(formData: FormData) {
   const entityId = String(formData.get("entityId"));
-  await assertEntityAccess(entityId);
+  await assertEntityWrite(entityId);
   const loanId = formData.get("loanId") ? String(formData.get("loanId")) : undefined;
 
   const ratePct    = floatOrNull(formData.get("annualRatePct"));
@@ -66,6 +58,23 @@ export async function saveLoan(formData: FormData) {
   };
 
   await upsertLoan(entityId, input, loanId);
+  // Before redirect() (which throws): record the change to the loan/mortgage
+  // configuration — this drives the liability engine's principal/interest/escrow
+  // splits, so it's review-worthy even though it posts no journal entry itself.
+  await logAudit({
+    entityId,
+    actionType: loanId ? "update_loan" : "create_loan",
+    objectTable: "bk_loans",
+    objectId: loanId ?? null,
+    description: `${loanId ? "Updated" : "Created"} loan "${input.name}"${input.expectedPaymentCents != null ? " (auto-split enabled)" : ""}`,
+    after: {
+      name: input.name,
+      annualRateBps: input.annualRateBps,
+      expectedPaymentCents: input.expectedPaymentCents,
+      monthlyEscrowCents: input.monthlyEscrowCents,
+      interestOnly: input.interestOnly,
+    },
+  });
   revalidatePath(`/ledger/${entityId}/loans`);
   revalidatePath(`/ledger/${entityId}`);
   redirect(`/ledger/${entityId}/loans`);
@@ -73,9 +82,16 @@ export async function saveLoan(formData: FormData) {
 
 export async function removeLoan(formData: FormData) {
   const entityId = String(formData.get("entityId"));
-  await assertEntityAccess(entityId);
+  await assertEntityWrite(entityId);
   const loanId = String(formData.get("loanId"));
   await deleteLoan(entityId, loanId);
+  await logAudit({
+    entityId,
+    actionType: "delete_loan",
+    objectTable: "bk_loans",
+    objectId: loanId,
+    description: "Deleted a loan configuration",
+  });
   revalidatePath(`/ledger/${entityId}/loans`);
   revalidatePath(`/ledger/${entityId}`);
   redirect(`/ledger/${entityId}/loans`);

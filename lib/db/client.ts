@@ -25,7 +25,12 @@ const client =
   global.__bkSql ??
   postgres(getConnectionString(), {
     ssl: "require",
-    max: 3,
+    // A page render fans out ~15-20 small queries in parallel; with the
+    // transaction pooler in front (which multiplexes onto a few real DB
+    // connections) a larger client pool lets those run concurrently instead of
+    // queueing 3-at-a-time. Safe because the pooler — not this pool — is what
+    // the 60-connection DB limit actually sees.
+    max: 12,
     idle_timeout: 20,
     prepare: false,
   });

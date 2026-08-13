@@ -311,6 +311,39 @@ export async function revertTransaction(
       if (!original.has(key)) original.set(key, e);
     }
 
+    // Same reconciliation guard as editTransaction: a revert is just another
+    // edit, so it must not re-point a reconciled line or re-date an entry whose
+    // lines are tied to a completed statement. Undo the reconciliation first.
+    const lines = await tx
+      .select()
+      .from(bkJournalLines)
+      .where(eq(bkJournalLines.entryId, entryId));
+    const lineById = new Map(lines.map((l) => [l.id, l]));
+    const anyReconciled = lines.some((l) => l.reconciliationId != null);
+    for (const e of original.values()) {
+      if (
+        e.field === "txn_date" &&
+        e.oldValue &&
+        e.oldValue !== entry.txnDate &&
+        anyReconciled
+      ) {
+        throw new Error(
+          "this transaction has reconciled lines — undo the reconciliation before reverting its date"
+        );
+      }
+      if (
+        e.field === "account" &&
+        e.lineId &&
+        e.oldValue &&
+        lineById.get(e.lineId)?.reconciliationId != null &&
+        lineById.get(e.lineId)?.accountId !== e.oldValue
+      ) {
+        throw new Error(
+          "a line on this transaction is reconciled — undo the reconciliation before reverting it"
+        );
+      }
+    }
+
     const header: Partial<typeof bkJournalEntries.$inferInsert> = {};
     for (const e of original.values()) {
       if (e.field === "name") header.name = e.oldValue;

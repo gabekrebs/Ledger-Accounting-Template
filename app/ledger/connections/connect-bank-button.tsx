@@ -10,15 +10,16 @@ import { Button } from "@/components/ui/button";
 // navigate the browser out to the bank and back to the redirect_uri (this page)
 // with `?oauth_state_id=…`; on that reload we must resume Link with the SAME
 // token + receivedRedirectUri. sessionStorage survives the redirect; the `mode`
-// tag keeps the fresh-link resume distinct from an update-mode resume.
+// tag keeps a normal connect, a FORCE connect, and an update-mode resume distinct.
 const OAUTH_KEY = "plaid_link_resume";
 
 /**
  * OAuth return state, read once at mount (lazy initializer, not an effect):
  * the bank redirected back here with `?oauth_state_id=…` and we must resume
- * the SAME Link session from sessionStorage.
+ * the SAME Link session from sessionStorage — but only the button whose `mode`
+ * was saved should resume, so a normal and a force button never fight over it.
  */
-function readOAuthResume(): { token: string; redirectUri: string } | null {
+function readOAuthResume(mode: string): { token: string; redirectUri: string } | null {
   if (
     typeof window === "undefined" ||
     !window.location.search.includes("oauth_state_id=")
@@ -27,7 +28,7 @@ function readOAuthResume(): { token: string; redirectUri: string } | null {
   }
   try {
     const saved = JSON.parse(sessionStorage.getItem(OAUTH_KEY) ?? "null");
-    if (saved?.mode === "connect" && saved.token) {
+    if (saved?.mode === mode && saved.token) {
       return { token: saved.token, redirectUri: window.location.href };
     }
   } catch {
@@ -38,25 +39,30 @@ function readOAuthResume(): { token: string; redirectUri: string } | null {
 
 /**
  * Global "Connect a bank" — links one bank auth WITHOUT binding it to an entity.
- * The returned accounts come back unassigned; you route each one to a business
- * below. Handles the OAuth redirect flow required by Chase and most large banks.
+ * The returned accounts come back unassigned; you route each one to a business.
+ * Handles the OAuth redirect flow required by Chase and most large banks.
+ *
+ * `force` variant ("Add a separate login at a bank"): sends `force: true` to the
+ * exchange, bypassing the one-login-one-Item block for a GENUINELY DIFFERENT
+ * login at an already-connected bank (e.g. a credit card on a separate profile).
+ * It never re-links an existing connection, so it can't trigger the Chase
+ * invalidate-on-relink breakage. Gated behind a confirmation.
  */
-export function ConnectBankButton() {
+export function ConnectBankButton({ force = false }: { force?: boolean }) {
+  const MODE = force ? "connect-force" : "connect";
   const router = useRouter();
   const [linkToken, setLinkToken] = useState<string | null>(
-    () => readOAuthResume()?.token ?? null
+    () => readOAuthResume(MODE)?.token ?? null
   );
   const [receivedRedirectUri, setReceivedRedirectUri] = useState<
     string | undefined
-  >(() => readOAuthResume()?.redirectUri);
+  >(() => readOAuthResume(MODE)?.redirectUri);
   const [busy, setBusy] = useState(false);
+  // Force flow requires an explicit confirmation before Link opens.
+  const [armed, setArmed] = useState(false);
 
   useEffect(() => {
-    // OAuth return (resume state already initialized above): don't mint a
-    // fresh token — the redirected session must resume with the SAME one.
     if (window.location.search.includes("oauth_state_id=")) return;
-
-    // Normal load: mint a fresh link token and stash it for a possible OAuth hop.
     let cancelled = false;
     fetch("/api/plaid/link-token", {
       method: "POST",
@@ -82,6 +88,7 @@ export function ConnectBankButton() {
       /* noop */
     }
     setReceivedRedirectUri(undefined);
+    setArmed(false);
     if (
       typeof window !== "undefined" &&
       window.location.search.includes("oauth_state_id=")
@@ -97,10 +104,10 @@ export function ConnectBankButton() {
         const res = await fetch("/api/plaid/exchange", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ public_token }),
+          body: JSON.stringify({ public_token, force }),
         });
         const data = await res.json();
-        // Duplicate-Item hard block: one login = one Item. Steer to Update Mode.
+        // Duplicate-Item hard block (normal flow only; force bypasses it).
         if (res.status === 409 && data.error === "duplicate_item") {
           toast.warning(data.message ?? "This bank is already connected.", {
             duration: 12000,
@@ -133,7 +140,7 @@ export function ConnectBankButton() {
         setBusy(false);
       }
     },
-    [router, cleanupOAuth]
+    [router, cleanupOAuth, force]
   );
 
   const { open, ready } = usePlaidLink({
@@ -146,31 +153,67 @@ export function ConnectBankButton() {
     },
   });
 
-  // On an OAuth return, auto-reopen Link to finish the handshake once it's ready.
   useEffect(() => {
     if (receivedRedirectUri && linkToken && ready) open();
   }, [receivedRedirectUri, linkToken, ready, open]);
 
-  // Persist the active flow ONLY when the user actually opens Link, so an OAuth
-  // redirect can resume the SAME session — and so an update-mode flow (which
-  // shares this key) is never clobbered by a connect that was never started.
-  const handleConnect = useCallback(() => {
+  const startLink = useCallback(() => {
     if (linkToken) {
       try {
         sessionStorage.setItem(
           OAUTH_KEY,
-          JSON.stringify({ token: linkToken, mode: "connect" })
+          JSON.stringify({ token: linkToken, mode: MODE })
         );
       } catch {
         /* sessionStorage unavailable — OAuth banks just won't resume */
       }
     }
     open();
-  }, [linkToken, open]);
+  }, [linkToken, open, MODE]);
 
+  // Normal connect button.
+  if (!force) {
+    return (
+      <Button onClick={startLink} disabled={!ready || !linkToken || busy}>
+        {busy ? "Connecting…" : "Connect a bank"}
+      </Button>
+    );
+  }
+
+  // Force connect — behind a confirmation with a clear warning.
+  if (!armed) {
+    return (
+      <Button variant="outline" onClick={() => setArmed(true)} disabled={busy}>
+        Add a separate login at a bank
+      </Button>
+    );
+  }
   return (
-    <Button onClick={handleConnect} disabled={!ready || !linkToken || busy}>
-      {busy ? "Connecting…" : "Connect a bank"}
-    </Button>
+    <div className="space-y-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm dark:border-amber-400/30 dark:bg-amber-400/10">
+      <p className="font-medium text-amber-900 dark:text-amber-200">
+        Only for a genuinely different login at a bank you&rsquo;ve already
+        connected
+      </p>
+      <p className="text-xs text-amber-800 dark:text-amber-200/80">
+        Use this when accounts live under a <span className="font-medium">separate</span>{" "}
+        login (e.g. a credit card on its own profile). Do <span className="font-medium">not</span>{" "}
+        use it to re-link a connection you already have — to add or refresh
+        accounts on an existing login, use &ldquo;Update / add accounts&rdquo; on
+        that connection instead. Sign in with the <span className="font-medium">other</span>{" "}
+        login on the next screen.
+      </p>
+      <div className="flex gap-2 pt-1">
+        <Button
+          size="sm"
+          onClick={startLink}
+          disabled={!ready || !linkToken || busy}
+        >
+          {busy ? "Connecting…" : "Continue — add separate login"}
+        </Button>
+        <Button size="sm" variant="ghost" onClick={() => setArmed(false)} disabled={busy}>
+          Cancel
+        </Button>
+      </div>
+    </div>
   );
 }

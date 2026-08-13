@@ -50,7 +50,7 @@ export function NewEntityForm() {
             Add entity
           </h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Creates the entity in the ledger. You can import Wave history afterward.
+            Creates the entity in the ledger. Connect its bank accounts afterward.
           </p>
         </div>
 
@@ -99,7 +99,7 @@ export function NewEntityForm() {
                 <span className="text-muted-foreground font-normal">(optional)</span>
               </legend>
               {totalPct > 0 && (
-                <span className={`text-xs tabular-nums ${Math.abs(totalPct - 100) < 0.01 ? "text-green-600" : "text-amber-600"}`}>
+                <span className={`text-xs tabular-nums ${Math.abs(totalPct - 100) < 0.01 ? "text-green-600 dark:text-green-400" : "text-amber-600 dark:text-amber-400"}`}>
                   {totalPct.toFixed(1)}%
                 </span>
               )}
